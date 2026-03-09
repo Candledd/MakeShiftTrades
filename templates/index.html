@@ -282,7 +282,7 @@ let priceLinesArr = [];     // active createPriceLine handles
 let indData       = {};     // latest indicator payload from /api/indicators
 let activeInds    = new Set(['fvg','ob','engulfing','liquidity','ms','swings']);
 let arTimer       = null;
-let arCountdown   = 10;
+let arCountdown   = 5;
 let arEnabled     = true;
 
 // RAF-loop state for canvas redraw detection
@@ -575,7 +575,7 @@ function toggleInd(name) {
 function manualRefresh() {
   if (!activeTicker) return;
   loadChart(true);
-  if (arEnabled) { arCountdown = 10; updateARLabel(); }
+  if (arEnabled) { arCountdown = 5; updateARLabel(); }
 }
 
 
@@ -583,10 +583,10 @@ function manualRefresh() {
 function startAR() {
   clearInterval(arTimer);
   if (!arEnabled) { updateARLabel(); return; }
-  arCountdown = 10; updateARLabel();
+  arCountdown = 5; updateARLabel();
   arTimer = setInterval(() => {
     arCountdown--;
-    if (arCountdown <= 0) { arCountdown = 10; loadChart(true); }
+    if (arCountdown <= 0) { arCountdown = 5; loadChart(true); }
     updateARLabel();
   }, 1000);
 }
