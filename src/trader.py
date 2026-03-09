@@ -8,6 +8,7 @@ class Trader:
         self.symbol = symbol
         self.max_trade_amount = max_trade_amount
         self.dry_run = dry_run
+        
 
     def get_price(self) -> float:
         """Fetch the current price for the symbol. Replace with a real API call."""

@@ -1,0 +1,226 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © TFlab
+//@version=5
+indicator("FVG & IFVG ICT [TradingFinder] Inversion Fair Value Gap Signal" ,'Inversion FVG TFlab', overlay = true, max_bars_back = 5000, max_boxes_count = 500,max_labels_count = 500, max_lines_count = 500 )
+
+//import Libraries
+    //import Order Block Drawing  Library
+import TFlab/OrderBlockDrawing_TradingFinder/3 as Drawing
+    //import FVG  Library
+import TFlab/FVGDetectorLibrary/3 as FVG
+    //import Alert Sender Library
+import TFlab/AlertSenderLibrary_TradingFinder/1 as Alert
+    //import Switching Colors Theme
+import TFlab/Dark_Light_Theme_TradingFinder_Switching_Colors_Library/1 as SC
+//Input
+    //Global Setting
+ShowAllFVG = input.bool(true, 'Show All FVG', group = 'Global Setting')
+ShowAllIFVG = input.bool(true, 'Show All Inversion FVG', group = 'Global Setting')
+FVGVaP = input.int(500, 'FVG & IFVG Validity Period (Bar)' , group = 'Logic Parameter' , maxval = 4998 , minval = 10,
+ tooltip = 'You can set the validity period of each FVG & IFVG based on the number of candles that have passed since the origin of the Order Block.', group = 'Global Setting')
+SCMode = input.string('Light', 'Switching Colors Theme Mode', options = ['Off', 'Light', 'Dark'])
+    //FVG
+PShowDeFVG = input.bool(true, ' Show Bullish FVG', group = 'FVG',inline = 'DFVG')
+PShowSuFVG = input.bool(true, ' Show Bearish FVG', group = 'FVG',inline = 'SFVG')
+OCShowDeFVG = input.color(#4caf4f65, '', group = 'FVG',inline = 'DFVG')
+OCShowSuFVG = input.color(#ff525291, '', group = 'FVG',inline = 'SFVG')
+MLFVG = input.string('50 % OB' , 'Mitigation Level FVG', ['Proximal', '50 % OB', 'Distal'], 
+ tooltip= 'Using this entry, you can determine which level the price reacts to in a FVG.', group = 'FVG')
+
+PShowDeIFVG = input.bool(true, ' Show Bearish Inversion FVG', group = 'Inversion FVG',inline = 'IDFVG')
+PShowSuIFVG = input.bool(true, ' Show Bullish Inversion FVG', group = 'Inversion FVG',inline = 'ISFVG')
+OCShowDeIFVG = input.color(#ff52522f, '', group = 'Inversion FVG',inline = 'IDFVG')
+OCShowSuIFVG = input.color(#4caf4f27, '', group = 'Inversion FVG',inline = 'ISFVG')
+MLIFVG = input.string('50 % OB' , 'Mitigation Level IFVG', ['Proximal', '50 % OB', 'Distal'], 
+ tooltip= 'Using this entry, you can determine which level the price reacts to in a Inversion FVG.', group = 'Inversion FVG')
+
+
+
+PFVGFilter = input.bool(true, 'FVG Filter ............',  group = 'FVG' , inline = 'FVG Filter')
+PFVGFilterType = input.string('Very Defensive', '', 
+ ['Very Aggressive' , 'Aggressive' , 'Defensive' , 'Very Defensive'], group = 'FVG', inline = 'FVG Filter' ,
+ tooltip = 'If it is "On", this filter will filter "FVGs" based on the width of the Zone.'  + 
+ 'From "Very Aggressive" to "Very Defensive" the width of the "FVG" decreases.')
+
+
+AlertName = input.string('FVG & IFVG Inversion [TradingFinder]', 'Alerts Name', group = 'Alert')
+
+Alert_FVG = input.string('On' , 'Alert FVG Mitigation' , ['On', 'Off'], 'If you turn on the Alert FVG Mitigation,' + 
+ 'you can receive alerts and notifications after setting the "Alert".' , group = 'Alert')
+
+Alert_IFVG = input.string('On' , 'Alert Inversion FVG Mitigation' , ['On', 'Off'], 'If you turn on the Alert Inversion FVG Mitigation,' +
+ 'you can receive alerts and notifications after setting the "Alert".' , group = 'Alert')
+
+
+Frequncy = input.string('Once Per Bar' , 'Message Frequency' , ['All', 'Once Per Bar' , 'Per Bar Close'], 'The triggering frequency. Possible values are: All'+ 
+ ' (all function calls trigger the alert), Once Per Bar (the first function call during the bar triggers the alert), ' +  
+ ' Per Bar Close (the function call triggers the alert only when it occurs during the last script iteration of the real-time bar,' +  
+ ' when it closes). The default is alert.freq_once_per_bar.)', group = 'Alert')
+UTC = input.string('UTC' , 'Show Alert time by Time Zone', group = 'Alert')
+MoreInfo = input.string('On', 'Display More Info', ['On', 'Off'], group = 'Alert')
+
+/////////////////////////////////
+///////////////SCT///////////////
+/////////////////////////////////
+
+[CShowDeFVG]  = SC.SwitchingColorMode(OCShowDeFVG , SCMode)
+[CShowSuFVG]  = SC.SwitchingColorMode(OCShowSuFVG , SCMode)
+[CShowDeIFVG] = SC.SwitchingColorMode(OCShowDeIFVG , SCMode)
+[CShowSuIFVG] = SC.SwitchingColorMode(OCShowSuIFVG , SCMode)
+/////////////////////////////////
+///////////////FVG///////////////
+/////////////////////////////////
+
+[DConditionFVG, DDFVG, DPFVG, BarDFVG, SConditionFVG, SDFVG, SPFVG, BarSFVG] = FVG.FVGDetector(PFVGFilter ? 'On' : 'Off', PFVGFilterType, false, false)
+
+
+/////////////////////////////////////
+///////////////Drawing///////////////
+/////////////////////////////////////
+
+    //OUTPUT ==> Alert Trigger
+[Alert_DFVG, Alert_DIFVG] = Drawing.OBDrawing('Demand', DConditionFVG,DDFVG, DPFVG, BarDFVG, true, FVGVaP, MLFVG, MLIFVG, ShowAllFVG, ShowAllIFVG, PShowDeFVG, PShowDeIFVG, CShowDeFVG, CShowDeIFVG)
+[Alert_SFVG, Alert_SIFVG] = Drawing.OBDrawing('Supply', SConditionFVG, SDFVG, SPFVG, BarSFVG, true, FVGVaP, MLFVG, MLIFVG, ShowAllFVG, ShowAllIFVG, PShowSuFVG, PShowSuIFVG, CShowSuFVG, CShowSuIFVG)
+
+
+///////////////////////////////////
+///////////////Alert///////////////
+///////////////////////////////////
+
+Alert.AlertSender(Alert_DFVG  , Alert_FVG, AlertName, 'Bullish', 'Order Block Signal', 'Full' ,Frequncy, UTC, MoreInfo, 'Long Position in Bullish FVG', open, high, low, close,0,0,0, DDFVG , DPFVG)
+Alert.AlertSender(Alert_DIFVG  , Alert_IFVG, AlertName, 'Bearish', 'Order Block Signal', 'Full' ,Frequncy, UTC, MoreInfo, 'Short Position in Bearish IFVG', open, high, low, close,0,0,0, DPFVG  , DDFVG)
+
+Alert.AlertSender(Alert_SFVG  , Alert_FVG, AlertName, 'Bearish', 'Order Block Signal', 'Full' ,Frequncy, UTC, MoreInfo, 'Short Position in Bearish FVG', open, high, low, close,0,0,0, SDFVG , SPFVG)
+Alert.AlertSender(Alert_SIFVG  , Alert_IFVG, AlertName, 'Bullish', 'Order Block Signal', 'Full' ,Frequncy, UTC, MoreInfo, 'Long Position in Bullish IFVG', open, high, low, close,0,0,0, SPFVG  , SDFVG)
+
+//To spot a Fair Value Gap (FVG) on a chart, you need to perform a detailed candle-by-candle analysis.
+
+// Here’s the process:
+
+// Focus on Candles with Large Bodies: Identify a candle with a substantial body and examine it alongside the preceding candle.
+// Check Surrounding Candles: The candles immediately before and after the central candle should have long shadows.
+// Ensure No Overlap: The bodies of the candles before and after the central candle should not overlap with the body of the central candle.
+// Determine the FVG Range: The gap between the shadows of the first and third candles forms the FVG range.
+
+
+
+// snapshot
+
+
+
+// 🟣ICT Inversion Fair Value Gap (IFVG)
+
+// An ICT Inversion Fair Value Gap, also known as a reverse FVG, is a failed fair value gap where the price does not respect the gap. An IFVG forms when a fair value gap fails to hold the price and the price moves beyond it, breaking the fair value gap.
+
+// This marks the initial shift in price momentum. Typically, when the price moves in one direction, it respects the fair value gaps and continues its trend.
+
+// However, if a fair value gap is violated, it acts as an inversion fair value gap, indicating the first change in price momentum, potentially leading to a short-term reversal or a subsequent change in direction.
+
+
+
+
+// 🟣Bullish Inversion Fair Value Gap (Bullish IFVG)
+
+// snapshot
+
+
+
+// 🟣Bearish Inversion Fair Value Gap (Bearish IFVG)
+
+// snapshot
+
+
+
+// 🔵How to Use
+
+// 🟣Identify an Inversion Fair Value Gap
+
+// To identify an IFVG, you first need to recognize a fair value gap. Just as fair value gaps come in two types, inversion fair value gaps also fall into two categories:
+
+// 🟣Bullish Inversion Fair Value Gap
+
+// A bullish IFVG is essentially a bearish fair value gap that is invalidated by the price closing above it.
+
+// Here’s how to identify it:
+
+// Identify a bearish fair value gap.
+// When the price closes above this bearish fair value gap, it transforms into a bullish inversion fair value gap.
+
+
+// This gap acts as support for the price and drives it upwards, indicating a reduction in sellers' strength and an initial shift in momentum towards buyers.
+
+// snapshot
+
+
+
+// 🟣Bearish Inversion Fair Value Gap
+
+// A bearish IFVG is primarily a bullish fair value gap that fails to hold the price, with the price closing below it.
+
+// Here’s how to identify it:
+
+// Identify a bullish fair value gap.
+// When the price closes below this gap, it becomes a bearish inversion fair value gap.
+
+
+// This gap acts as resistance for the price, pushing it downwards. A bearish inversion fair value gap signifies a decrease in buyers' momentum and an increase in sellers' strength.
+
+
+// snapshot
+
+
+
+// 🔵Setting
+
+
+// 🟣Global Setting
+
+// Show All FVG: If it is turned off, only the last FVG will be displayed.
+
+// Show All Inversion FVG: If it is turned off, only the last FVG will be displayed.
+
+// FVG and IFVG Validity Period (Bar): You can specify the maximum time the FVG and the IFVG remains valid based on the number of candles from the origin.
+
+// Switching Colors Theme Mode: Three modes "Off", "Light" and "Dark" are included in this parameter. "Light" mode is for color adjustment for use in "Light Mode".
+
+// "Dark" mode is for color adjustment for use in "Dark Mode" and "Off" mode turns off the color adjustment function and the input color to the function is the same as the output color.
+
+
+// 🟣Logic Setting
+
+
+// FVG Filter
+
+// When utilizing FVG filtering, the number of identified FVG areas undergoes refinement based on a specified algorithm. This process helps to focus on higher quality signals and eliminate noise.
+
+// Here are the types of FVG filters available:
+
+// Very Aggressive Filter: Introduces an additional condition to the initial criteria. For an upward FVG, the highest price of the last candle must exceed the highest price of the middle candle. Similarly, for a downward FVG, the lowest price of the last candle should be lower than the lowest price of the middle candle. This mode minimally filters out FVGs.
+// Aggressive Filter: Builds upon the Very Aggressive mode by considering the size of the middle candle. It ensures the middle candle is not too small, thereby eliminating more FVGs compared to the Very Aggressive mode.
+// Defensive Filter: In addition to the conditions of the Very Aggressive mode, the Defensive mode incorporates criteria regarding the size and structure of the middle candle. It requires the middle candle to have a substantial body, with specific polarity conditions for the second and third candles relative to the first candle's direction. This mode filters out a significant number of FVGs, focusing on higher-quality signals.
+// Very Defensive Filter: Further refines filtering by adding conditions that the first and third candles should not be small-bodied doji candles. This stringent mode eliminates the majority of FVGs, retaining only the highest quality signals.
+
+
+// Mitigation Level FVG and IFVG : Its inputs are one of "Proximal", "Distal" or "50 % OB" modes, which you can enter according to your needs. The "50 % OB" line is the middle line between distal and proximal.
+
+
+// 🟣Display Setting
+
+// Show Bullish FVG: Enables the display of demand-related boxes, which can be toggled on or off.
+// Show Bearish FVG: Enables the display of supply-related boxes along the path, which can also be toggled on or off.
+// Show Bullish IFVG: Enables the display of demand-related boxes, which can be toggled on or off.
+// Show Bearish IFVG: Enables the display of supply-related boxes along the path, which can also be toggled on or off.
+
+
+// 🟣Alert Setting
+
+// Alert FVG Mitigation: If you want to receive the alert about FVG's mitigation after setting the alerts, leave this tick on. Otherwise, turn it off.
+
+// Alert Inversion FVG Mitigation: If you want to receive the alert about Inversion FVG's mitigation after setting the alerts, leave this tick on. Otherwise, turn it off.
+
+
+// Message Frequency: This parameter, represented as a string, determines the frequency of announcements. Options include: 'All' (triggers the alert every time the function is called), 'Once Per Bar' (triggers the alert only on the first call within the bar), and 'Once Per Bar Close' (activates the alert only during the final script execution of the real-time bar upon closure). The default setting is 'Once per Bar'.
+
+// Show Alert time by Time Zone: The date, hour, and minute displayed in alert messages can be configured to reflect any chosen time zone. For instance, if you prefer London time, you should input 'UTC+1'. By default, this input is configured to the 'UTC' time zone.
+
+// Display More Info: The 'Display More Info' option provides details regarding the price range of the order blocks (Zone Price), along with the date, hour, and minute. If you prefer not to include this information in the alert message, you should set it to 'Off'.
