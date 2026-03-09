@@ -14,23 +14,44 @@ from .indicators.price_action import (
     detect_order_blocks,
 )
 
-# ── Colour palette (TradingView dark-mode inspired) ──────────────────────────
+# ── Colour palette ───────────────────────────────────────────────────────────
+# Each indicator family uses a distinct hue so layers never look the same:
+#   Candlestick  → teal / red        (standard)
+#   FVG / IFVG   → cornflower-blue / amber
+#   Order Blocks → teal / red        (bolder fill than candles)
+#   Engulfing    → cyan / magenta
+#   Liquidity    → amber / violet
+#   Market Str.  → orange / sky-blue
+#   Swing H/L    → red / teal        (own keys, same hue as candles)
 C = {
-    "bg":         "#131722",
-    "grid":       "#363a45",
-    "text":       "#B2B5BE",
-    "bull":       "#089981",
-    "bear":       "#f23645",
-    "choch":      "#e0c36a",
-    "bos":        "#8888aa",
-    # FVG fills (RGBA strings)
-    "fvg_bull":   "rgba(8,153,129,0.18)",
-    "fvg_bear":   "rgba(242,54,69,0.18)",
-    "ifvg_bull":  "rgba(8,153,129,0.07)",
-    "ifvg_bear":  "rgba(242,54,69,0.07)",
-    # Order block fills
-    "ob_bull":    "rgba(8,153,129,0.28)",
-    "ob_bear":    "rgba(242,54,69,0.28)",
+    "bg":            "#131722",
+    "grid":          "#363a45",
+    "text":          "#B2B5BE",
+    # Candlestick — standard TradingView green / red
+    "bull":          "#089981",
+    "bear":          "#f23645",
+    # FVG / IFVG — cornflower-blue / amber
+    "fvg_bull":      "rgba(100,149,237,0.22)",
+    "fvg_bear":      "rgba(255,165,0,0.22)",
+    "fvg_bull_line": "#6495ed",
+    "fvg_bear_line": "#ffa500",
+    "ifvg_bull":     "rgba(100,149,237,0.08)",
+    "ifvg_bear":     "rgba(255,165,0,0.08)",
+    # Order Blocks — teal / crimson (same hue as candles, bolder fill)
+    "ob_bull":       "rgba(8,153,129,0.32)",
+    "ob_bear":       "rgba(242,54,69,0.32)",
+    # Engulfing markers — cyan / magenta
+    "eng_bull":      "#00bcd4",
+    "eng_bear":      "#e040fb",
+    # Liquidity levels — amber / violet
+    "liq_high":      "#ffb300",
+    "liq_low":       "#ab47bc",
+    # Market structure
+    "choch":         "#ffa726",
+    "bos":           "#29b6f6",
+    # Swing High / Low (independent keys)
+    "swing_high":    "#f23645",
+    "swing_low":     "#089981",
 }
 
 _OPACITY_BY_STRENGTH = {1: 0.20, 2: 0.35, 3: 0.50, 4: 0.65, 5: 0.80}
@@ -100,7 +121,7 @@ def build_chart(
                 else:
                     fill  = C["fvg_bull"] if is_bull else C["fvg_bear"]
                     dash  = "solid"
-                border = C["bull"] if is_bull else C["bear"]
+                border = C["fvg_bull_line"] if is_bull else C["fvg_bear_line"]
                 end_d  = row["end_date"] if row["active"] is False else last_date
 
                 fig.add_shape(
@@ -118,15 +139,15 @@ def build_chart(
             fig.add_trace(
                 go.Scatter(
                     x=[None], y=[None], mode="markers",
-                    marker=dict(size=10, color=C["fvg_bull"], symbol="square"),
-                    name="Bullish FVG",
+                    marker=dict(size=10, color=C["fvg_bull_line"], symbol="square", opacity=0.75),
+                    name="Bullish FVG (blue)",
                 )
             )
             fig.add_trace(
                 go.Scatter(
                     x=[None], y=[None], mode="markers",
-                    marker=dict(size=10, color=C["fvg_bear"], symbol="square"),
-                    name="Bearish FVG",
+                    marker=dict(size=10, color=C["fvg_bear_line"], symbol="square", opacity=0.75),
+                    name="Bearish FVG (amber)",
                 )
             )
 
@@ -144,8 +165,8 @@ def build_chart(
                         x=bull_e["date"],
                         y=bull_e["price"] * 0.9995,
                         mode="markers",
-                        marker=dict(symbol="triangle-up", size=9, color=C["bull"]),
-                        name="Bullish Engulf",
+                        marker=dict(symbol="triangle-up", size=10, color=C["eng_bull"]),
+                        name="Bullish Engulf (cyan)",
                     )
                 )
             if not bear_e.empty:
@@ -154,8 +175,8 @@ def build_chart(
                         x=bear_e["date"],
                         y=bear_e["price"] * 1.0005,
                         mode="markers",
-                        marker=dict(symbol="triangle-down", size=9, color=C["bear"]),
-                        name="Bearish Engulf",
+                        marker=dict(symbol="triangle-down", size=10, color=C["eng_bear"]),
+                        name="Bearish Engulf (magenta)",
                     )
                 )
 
@@ -172,7 +193,7 @@ def build_chart(
             if p_key in seen_prices:
                 continue
             seen_prices.add(p_key)
-            color   = C["bear"] if lv["dir"] == "high" else C["bull"]
+            color   = C["liq_high"] if lv["dir"] == "high" else C["liq_low"]
             opacity = _OPACITY_BY_STRENGTH[lv["strength"]]
             fig.add_shape(
                 type="line",
@@ -188,15 +209,15 @@ def build_chart(
         fig.add_trace(
             go.Scatter(
                 x=[None], y=[None], mode="lines",
-                line=dict(color=C["bear"], dash="dot", width=1),
-                name="Sell-side Liquidity",
+                line=dict(color=C["liq_high"], dash="dot", width=1),
+                name="Sell-side Liq (amber)",
             )
         )
         fig.add_trace(
             go.Scatter(
                 x=[None], y=[None], mode="lines",
-                line=dict(color=C["bull"], dash="dot", width=1),
-                name="Buy-side Liquidity",
+                line=dict(color=C["liq_low"], dash="dot", width=1),
+                name="Buy-side Liq (violet)",
             )
         )
 
@@ -267,8 +288,8 @@ def build_chart(
                         mode="markers+text",
                         text=["SH"] * len(sh),
                         textposition="top center",
-                        marker=dict(symbol="triangle-down", size=7, color=C["bear"]),
-                        textfont=dict(size=7, color=C["bear"]),
+                        marker=dict(symbol="triangle-down", size=7, color=C["swing_high"]),
+                        textfont=dict(size=7, color=C["swing_high"]),
                         name="Swing High",
                     )
                 )
@@ -280,8 +301,8 @@ def build_chart(
                         mode="markers+text",
                         text=["SL"] * len(sl),
                         textposition="bottom center",
-                        marker=dict(symbol="triangle-up", size=7, color=C["bull"]),
-                        textfont=dict(size=7, color=C["bull"]),
+                        marker=dict(symbol="triangle-up", size=7, color=C["swing_low"]),
+                        textfont=dict(size=7, color=C["swing_low"]),
                         name="Swing Low",
                     )
                 )
@@ -308,6 +329,7 @@ def build_chart(
             linecolor=C["grid"],
             side="right",
             tickformat=".2f",
+            fixedrange=False,  # allow Y-axis drag to scale price
         ),
         legend=dict(
             bgcolor="rgba(19,23,34,0.8)",
