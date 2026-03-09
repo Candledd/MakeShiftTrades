@@ -1,0 +1,2 @@
+# MakeShiftTrades
+Vibecoded Daytrading Bot
