@@ -370,15 +370,21 @@ class SMCStrategy:
         if fvg_df.empty:
             return None
 
-        recent_cutoff = df.index[-self.fvg_lookback]
-        aligned_fvgs  = fvg_df[
+        # find_setup scans ALL active aligned FVGs (no recency cutoff) so the
+        # UI always has a pending level to display regardless of when the FVG
+        # was formed.  Closest-to-current-price is tried first.
+        aligned_fvgs = fvg_df[
             (fvg_df["active"] == True) &          # noqa: E712
-            (fvg_df["type"]   == trend) &
-            (fvg_df["date"]   >= recent_cutoff)
-        ].sort_values("date", ascending=False)
+            (fvg_df["type"]   == trend)
+        ].copy()
 
         if aligned_fvgs.empty:
             return None
+
+        aligned_fvgs["_dist"] = aligned_fvgs["bottom"].apply(
+            lambda b: abs(current_price - b)
+        )
+        aligned_fvgs = aligned_fvgs.sort_values("_dist")
 
         order_blocks = detect_order_blocks(df, term=self.ms_term)
         liquidity    = detect_liquidity_levels(df)
