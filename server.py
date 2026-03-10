@@ -5,11 +5,18 @@ Run with:
 
 Then open  http://localhost:5000  in your browser.
 """
+import logging
+import threading
 import traceback
 
 import pandas as pd
 import plotly.io as pio
 from flask import Flask, Response, jsonify, render_template, request
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
 
 from charts.data import fetch_ohlcv
 from charts.renderer import build_chart
@@ -25,6 +32,20 @@ from charts.indicators.price_action import (
 app = Flask(__name__)
 
 TICKERS = ["NQ=F", "ES=F", "YM=F", "RTY=F", "SPY", "QQQ", "AAPL", "TSLA", "GC=F", "CL=F"]
+
+# ── Background ML training (fires once at server start) ────────────────────────
+from src.ml_model import get_model as _get_ml_model
+
+
+def _bg_train() -> None:
+    logging.getLogger(__name__).info("Background ML training started…")
+    try:
+        _get_ml_model().fit()
+    except Exception as _exc:
+        logging.getLogger(__name__).error("ML training failed: %s", _exc)
+
+
+threading.Thread(target=_bg_train, daemon=True).start()
 
 
 def _to_ts(ts) -> int:
@@ -192,6 +213,96 @@ def api_chart():
         fig_json = pio.to_json(fig)
         payload  = '{"ok":true,"figure":' + fig_json + "}"
         return Response(payload, mimetype="application/json")
+
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"Server error: {exc}"}), 500
+
+
+# ── Signal API ─────────────────────────────────────────────────────────────────
+
+@app.route("/api/signal")
+def api_signal():
+    """
+    Returns the combined SMC + ML trade signal for the requested ticker.
+
+    Query params: ticker, interval, period
+    Response JSON keys:
+      ok, ticker, signal, confidence, alignment,
+      ml  : { signal, confidence, probabilities, trained },
+      smc : { signal, entry, stop_loss, take_profit, risk_reward,
+              confidence, reason, smc_score }
+    """
+    ticker   = request.args.get("ticker",   "SPY").strip().upper()
+    interval = request.args.get("interval", "5m")
+    period   = request.args.get("period",   "5d")
+
+    try:
+        df = fetch_ohlcv(ticker, period=period, interval=interval)
+
+        # ── SMC signal ──────────────────────────────────────────────────
+        from src.strategy import SMCStrategy
+        strategy   = SMCStrategy(ticker, interval=interval, period=period)
+        smc_signal = strategy.analyze(df)
+
+        smc_dir   = smc_signal.direction if smc_signal else None
+        smc_score = 0
+        if smc_signal:
+            smc_score = 2  # trend + FVG always present when signal fires
+            if smc_signal.raw_data.get("has_ob"):
+                smc_score += 1
+            if smc_signal.raw_data.get("has_engulf"):
+                smc_score += 1
+
+        smc_block = {
+            "signal":      smc_dir,
+            "entry":       smc_signal.entry       if smc_signal else None,
+            "stop_loss":   smc_signal.stop_loss   if smc_signal else None,
+            "take_profit": smc_signal.take_profit if smc_signal else None,
+            "risk_reward": smc_signal.risk_reward if smc_signal else None,
+            "confidence":  smc_signal.confidence  if smc_signal else None,
+            "reason":      smc_signal.reason       if smc_signal else None,
+            "smc_score":   smc_score,
+        }
+
+        # ── ML signal ───────────────────────────────────────────────────
+        ml_result = _get_ml_model().predict(df)
+        ml_dir    = ml_result["signal"]
+        ml_conf   = ml_result["confidence"]
+
+        # ── Combine SMC + ML ────────────────────────────────────────────
+        if smc_dir and smc_dir == ml_dir:
+            # Both agree → boost confidence proportional to SMC score
+            final_signal = smc_dir
+            final_conf   = min(100.0, ml_conf + 15.0 * (smc_score / 4))
+            alignment    = "aligned"
+        elif smc_dir and ml_dir != "HOLD" and smc_dir != ml_dir:
+            # Explicit disagreement → show ML, reduce confidence
+            final_signal = ml_dir
+            final_conf   = ml_conf * 0.75
+            alignment    = "disagreement"
+        elif smc_dir:
+            # SMC fired, ML says HOLD → use SMC direction at slightly reduced confidence
+            final_signal = smc_dir
+            final_conf   = ml_conf * 0.85
+            alignment    = "smc_only"
+        else:
+            # No SMC setup; rely entirely on ML
+            final_signal = ml_dir
+            final_conf   = ml_conf
+            alignment    = "ml_only"
+
+        return jsonify({
+            "ok":         True,
+            "ticker":     ticker,
+            "signal":     final_signal,
+            "confidence": round(final_conf, 1),
+            "alignment":  alignment,
+            "ml":         ml_result,
+            "smc":        smc_block,
+        })
 
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400

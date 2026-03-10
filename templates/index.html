@@ -169,6 +169,72 @@ header {
   #chart-wrap { height: 380px; }
   .ind-panel { flex-direction: row; flex-wrap: wrap; }
 }
+
+/* ── AI Signal card ───────────────────────────────────────────────────── */
+#signal-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 13px; background: var(--surface2); flex-shrink: 0;
+}
+#signal-card h3 { margin-bottom: 7px; }
+.signal-badge {
+  display: block; text-align: center; font-size: 28px; font-weight: 800;
+  letter-spacing: 3px; padding: 9px 0; border-radius: var(--radius);
+  margin-bottom: 9px; transition: all .3s;
+}
+.signal-buy  { background: rgba(8,153,129,.18);  color: var(--bull); border: 1px solid rgba(8,153,129,.55); }
+.signal-sell { background: rgba(242,54,69,.18);   color: var(--bear); border: 1px solid rgba(242,54,69,.55); }
+.signal-hold { background: rgba(100,116,139,.12); color: var(--muted); border: 1px solid var(--border); }
+.signal-wait { background: rgba(100,116,139,.08); color: var(--muted); border: 1px solid var(--border); font-size: 15px; }
+.sig-conf-row {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: var(--muted); margin-bottom: 4px;
+}
+.sig-bar-wrap {
+  height: 5px; background: var(--border); border-radius: 3px;
+  overflow: hidden; margin-bottom: 11px;
+}
+.sig-bar-fill {
+  height: 100%; border-radius: 3px;
+  transition: width .45s ease, background .45s ease;
+}
+.sig-proba-row { display: flex; justify-content: space-between; margin-bottom: 11px; }
+.proba-item { flex: 1; text-align: center; }
+.proba-lbl  { font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; margin-bottom: 2px; }
+.proba-val  { font-size: 12px; color: var(--text); font-weight: 600; }
+.proba-buy  { color: var(--bull); }
+.proba-sell { color: var(--bear); }
+.proba-hold { color: var(--muted); }
+.sig-levels {
+  display: none;
+  border-top: 1px solid var(--border); padding-top: 9px;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 5px 6px;
+}
+.sig-levels.hidden { display: none; }
+.level-row  { display: flex; flex-direction: column; }
+.level-lbl  { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.level-val  { font-size: 12px; font-weight: 700; color: var(--text); margin-top: 1px; }
+.level-val.buy-col  { color: var(--bull); }
+.level-val.sell-col { color: var(--bear); }
+.sig-reason {
+  font-size: 10px; color: var(--muted); line-height: 1.5;
+  margin-top: 9px; border-top: 1px solid var(--border); padding-top: 7px;
+  word-break: break-word;
+}
+.sig-status { font-size: 10px; color: var(--muted); margin-top: 5px; font-style: italic; }
+.align-tag {
+  display: inline-block; font-size: 10px; padding: 2px 7px;
+  border-radius: 4px; font-weight: 700; letter-spacing: .4px;
+}
+.align-aligned     { background: rgba(8,153,129,.18);  color: var(--bull); }
+.align-ml_only     { background: rgba(167,139,250,.18); color: #a78bfa; }
+.align-smc_only    { background: rgba(59,130,246,.18);  color: var(--accent); }
+.align-disagreement{ background: rgba(255,183,0,.18);   color: #ffb300; }
+.smc-score-pip {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; margin-right: 3px;
+}
+.pip-on  { background: var(--accent); }
+.pip-off { background: var(--border); }
 </style>
 </head>
 <body>
@@ -221,6 +287,58 @@ header {
 
   <!-- ── Indicator panel ── -->
   <aside class="ind-panel">
+
+    <!-- ── AI Signal card ── -->
+    <div id="signal-card">
+      <h3>AI Signal</h3>
+      <div id="sig-badge" class="signal-badge signal-wait">···</div>
+
+      <div class="sig-conf-row">
+        <span>ML Confidence</span>
+        <span id="sig-conf-val">—</span>
+      </div>
+      <div class="sig-bar-wrap">
+        <div id="sig-bar" class="sig-bar-fill" style="width:0%"></div>
+      </div>
+
+      <div class="sig-proba-row">
+        <div class="proba-item">
+          <div class="proba-lbl proba-buy">BUY</div>
+          <div id="pb-buy"  class="proba-val">—</div>
+        </div>
+        <div class="proba-item">
+          <div class="proba-lbl proba-hold">HOLD</div>
+          <div id="pb-hold" class="proba-val">—</div>
+        </div>
+        <div class="proba-item">
+          <div class="proba-lbl proba-sell">SELL</div>
+          <div id="pb-sell" class="proba-val">—</div>
+        </div>
+      </div>
+
+      <div id="sig-levels" class="sig-levels hidden">
+        <div class="level-row">
+          <span class="level-lbl">Entry</span>
+          <span id="lv-entry" class="level-val">—</span>
+        </div>
+        <div class="level-row">
+          <span class="level-lbl">Stop</span>
+          <span id="lv-sl" class="level-val sell-col">—</span>
+        </div>
+        <div class="level-row">
+          <span class="level-lbl">Target</span>
+          <span id="lv-tp" class="level-val buy-col">—</span>
+        </div>
+        <div class="level-row">
+          <span class="level-lbl">R/R</span>
+          <span id="lv-rr" class="level-val">—</span>
+        </div>
+      </div>
+
+      <div id="sig-reason" class="sig-reason"></div>
+      <div id="sig-status" class="sig-status">Select a ticker</div>
+    </div>
+
     <div>
       <h3 style="margin-bottom:10px">Indicators</h3>
       <button class="ind-btn on" id="ind-fvg"       onclick="toggleInd('fvg')">
@@ -520,6 +638,7 @@ async function loadChart(preserveView = false) {
     const ir = await fetch(`/api/indicators?ticker=${activeTicker}&interval=${activeItvl}&period=${period}&indicators=${indStr}`);
     const id = await ir.json();
     if (id.ok) { indData = id; applyAll(); }
+    loadSignal();         // refresh AI signal panel
 
   } catch (err) {
     showErr('Network error — check console.');
@@ -609,6 +728,91 @@ function toggleAR() {
   else           { clearInterval(arTimer); updateARLabel(); }
 }
 
+/* ── AI Signal panel ────────────────────────────────────────────────── */
+async function loadSignal() {
+  if (!activeTicker) return;
+  const period = PERIOD[activeItvl] || '5d';
+  const badge  = document.getElementById('sig-badge');
+  const status = document.getElementById('sig-status');
+
+  badge.className   = 'signal-badge signal-wait';
+  badge.textContent = '···';
+  status.textContent = 'Analyzing…';
+
+  try {
+    const r = await fetch(
+      `/api/signal?ticker=${activeTicker}&interval=${activeItvl}&period=${period}`
+    );
+    const d = await r.json();
+
+    if (!d.ok) {
+      badge.textContent = '!';
+      status.textContent = d.error || 'Error';
+      return;
+    }
+
+    const sig  = d.signal;
+    const conf = d.confidence;
+
+    // ── Badge ──────────────────────────────────────────────────
+    const cls = sig === 'BUY'  ? 'signal-buy'
+              : sig === 'SELL' ? 'signal-sell'
+              : 'signal-hold';
+    badge.className   = 'signal-badge ' + cls;
+    badge.textContent = sig;
+
+    // ── Confidence bar ────────────────────────────────────────────
+    document.getElementById('sig-conf-val').textContent = conf.toFixed(1) + '%';
+    const fill = document.getElementById('sig-bar');
+    fill.style.width      = Math.min(conf, 100) + '%';
+    fill.style.background = sig === 'BUY'  ? 'var(--bull)'
+                          : sig === 'SELL' ? 'var(--bear)'
+                          : 'var(--muted)';
+
+    // ── Probabilities ────────────────────────────────────────────
+    const p = d.ml.probabilities || {};
+    document.getElementById('pb-buy').textContent  = (p.BUY  ?? 0).toFixed(1) + '%';
+    document.getElementById('pb-hold').textContent = (p.HOLD ?? 0).toFixed(1) + '%';
+    document.getElementById('pb-sell').textContent = (p.SELL ?? 0).toFixed(1) + '%';
+
+    // ── SMC levels ──────────────────────────────────────────────
+    const smc     = d.smc || {};
+    const lvBlock = document.getElementById('sig-levels');
+    if (smc.entry != null) {
+      document.getElementById('lv-entry').textContent = '$' + smc.entry.toFixed(2);
+      document.getElementById('lv-sl').textContent    = '$' + smc.stop_loss.toFixed(2);
+      document.getElementById('lv-tp').textContent    = '$' + smc.take_profit.toFixed(2);
+      document.getElementById('lv-rr').textContent    = smc.risk_reward.toFixed(2) + ':1';
+      lvBlock.classList.remove('hidden');
+    } else {
+      lvBlock.classList.add('hidden');
+    }
+
+    // ── SMC score pips + alignment tag ─────────────────────────────
+    const score    = smc.smc_score || 0;
+    const maxScore = 4;
+    let pipHtml = '';
+    for (let i = 0; i < maxScore; i++) {
+      pipHtml += `<span class="smc-score-pip ${i < score ? 'pip-on' : 'pip-off'}"></span>`;
+    }
+
+    const alignCls = 'align-' + (d.alignment || 'ml_only');
+    const alignLbl = (d.alignment || 'ml_only').replace('_', ' ');
+    const trainTxt = d.ml.trained ? '' : ' · Training ML…';
+
+    status.innerHTML = `
+      <span class="align-tag ${alignCls}">${alignLbl.toUpperCase()}</span>
+       SMC ${pipHtml}${trainTxt}`;
+
+    // ── Reason text ──────────────────────────────────────────────
+    document.getElementById('sig-reason').textContent = smc.reason || '';
+
+  } catch (err) {
+    document.getElementById('sig-badge').textContent  = '!';
+    document.getElementById('sig-status').textContent = 'Network error';
+    console.error('loadSignal error:', err);
+  }
+}
 
 /* ── Startup ────────────────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {
