@@ -54,3 +54,14 @@ try:
     MAX_SCANS = int(os.getenv("MAX_SCANS", "390"))
 except ValueError:
     raise ValueError("MAX_SCANS must be a valid integer")
+
+# ── Multi-Timeframe (MTF) parameters ─────────────────────────────────────────
+# Primary timeframes cross-referenced with equal weight (1.0 each).
+# 30m is supplementary only (weight 0.4) — it adds conviction to an
+# already-strong signal but cannot override primary-TF disagreement.
+MTF_MS_TERM = os.getenv("MTF_MS_TERM", MS_TERM)
+
+try:
+    MTF_MIN_RR = float(os.getenv("MTF_MIN_RR", str(MIN_RR)))
+except ValueError:
+    raise ValueError("MTF_MIN_RR must be a valid number")

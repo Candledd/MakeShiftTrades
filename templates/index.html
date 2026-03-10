@@ -233,6 +233,71 @@ header {
 }
 .pip-on  { background: var(--accent); }
 .pip-off { background: var(--border); }
+
+/* ── MTF Consensus card ─────────────────────────────────────────────────── */
+#mtf-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 13px; background: var(--surface2); flex-shrink: 0;
+}
+#mtf-card h3 { margin-bottom: 8px; }
+.mtf-head-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
+}
+.mtf-badge {
+  font-size: 12px; font-weight: 800; letter-spacing: .7px;
+  padding: 4px 9px; border-radius: 6px; white-space: nowrap;
+}
+.mtf-long       { background: rgba(8,153,129,.18);  color: var(--bull); border: 1px solid rgba(8,153,129,.55); }
+.mtf-short      { background: rgba(242,54,69,.18);   color: var(--bear); border: 1px solid rgba(242,54,69,.55); }
+.mtf-lean-long  { background: rgba(8,153,129,.09);   color: var(--bull); border: 1px solid rgba(8,153,129,.30); }
+.mtf-lean-short { background: rgba(242,54,69,.09);   color: var(--bear); border: 1px solid rgba(242,54,69,.30); }
+.mtf-neutral    { background: rgba(100,116,139,.12); color: var(--muted); border: 1px solid var(--border); }
+.mtf-score-txt  { font-size: 11px; color: var(--muted); margin-left: auto; }
+.mtf-bar-wrap {
+  height: 6px; background: var(--border); border-radius: 3px;
+  position: relative; overflow: hidden; margin-bottom: 10px;
+}
+.mtf-bar-long  {
+  position: absolute; left: 0; top: 0; height: 100%;
+  background: var(--bull); border-radius: 3px;
+  transition: width .35s ease;
+}
+.mtf-bar-short {
+  position: absolute; right: 0; top: 0; height: 100%;
+  background: var(--bear); border-radius: 3px;
+  transition: width .35s ease;
+}
+.mtf-tf-grid {
+  border-top: 1px solid var(--border); padding-top: 8px;
+  display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px;
+}
+.mtf-tf-row {
+  display: flex; align-items: center; gap: 5px; font-size: 11px;
+}
+.mtf-tf-label {
+  width: 30px; font-weight: 700; color: var(--muted);
+  font-size: 10px; flex-shrink: 0;
+}
+.mtf-trend-dot { flex-shrink: 0; }
+.mtf-dir {
+  font-weight: 800; font-size: 10px; letter-spacing: .4px;
+  padding: 1px 5px; border-radius: 4px;
+  min-width: 32px; text-align: center; flex-shrink: 0;
+}
+.mtf-dir-buy  { background: rgba(8,153,129,.18);  color: var(--bull); }
+.mtf-dir-sell { background: rgba(242,54,69,.18);   color: var(--bear); }
+.mtf-dir-none { background: rgba(100,116,139,.12); color: var(--muted); }
+.mtf-tf-rr   { color: var(--muted); font-size: 10px; }
+.mtf-zone-flag { font-size: 10px; }
+.mtf-supp-lbl  { font-size: 9px; color: var(--muted); font-style: italic; }
+.mtf-levels {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 5px 6px;
+  border-top: 1px solid var(--border); padding-top: 8px;
+}
+.mtf-src {
+  font-size: 10px; color: var(--muted); margin-top: 5px;
+  font-style: italic;
+}
 </style>
 </head>
 <body>
@@ -285,6 +350,51 @@ header {
 
   <!-- ── Indicator panel ── -->
   <aside class="ind-panel">
+
+    <!-- ── MTF Consensus card ── -->
+    <div id="mtf-card">
+      <h3>MTF Consensus
+        <span id="mtf-loading" style="color:var(--muted);font-size:9px;font-weight:400;font-style:italic"></span>
+      </h3>
+
+      <div class="mtf-head-row">
+        <div id="mtf-badge" class="mtf-badge mtf-neutral">···</div>
+        <div class="mtf-score-txt">
+          <span style="color:var(--bull)">▲&thinsp;<span id="mtf-long-pct">—</span>%</span>
+          &nbsp;/&nbsp;
+          <span style="color:var(--bear)">▼&thinsp;<span id="mtf-short-pct">—</span>%</span>
+        </div>
+      </div>
+
+      <div class="mtf-bar-wrap">
+        <div id="mtf-bar-long"  class="mtf-bar-long"  style="width:0%"></div>
+        <div id="mtf-bar-short" class="mtf-bar-short" style="width:0%"></div>
+      </div>
+
+      <!-- Per-TF rows injected by JS -->
+      <div class="mtf-tf-grid" id="mtf-tf-rows"></div>
+
+      <div class="mtf-levels">
+        <div class="level-row">
+          <span class="level-lbl">Entry</span>
+          <span id="mtf-entry" class="level-val">—</span>
+        </div>
+        <div class="level-row">
+          <span class="level-lbl">Stop</span>
+          <span id="mtf-sl" class="level-val sell-col">—</span>
+        </div>
+        <div class="level-row">
+          <span class="level-lbl">Target</span>
+          <span id="mtf-tp" class="level-val buy-col">—</span>
+        </div>
+        <div class="level-row">
+          <span class="level-lbl">R/R</span>
+          <span id="mtf-rr" class="level-val">—</span>
+        </div>
+      </div>
+
+      <div id="mtf-src" class="mtf-src"></div>
+    </div>
 
     <!-- ── AI Signal card ── -->
     <div id="signal-card">
@@ -763,6 +873,7 @@ async function loadChart(preserveView = false) {
       applyAll();
     }
     loadSignal();         // refresh AI signal panel
+    loadMTFSignal();      // refresh MTF consensus panel
 
   } catch (err) {
     showErr('Network error — check console.');
@@ -861,7 +972,105 @@ function toggleAR() {
   if (arEnabled) { if (activeTicker) loadChart(true); startAR(); }
   else           { clearInterval(arTimer); updateARLabel(); }
 }
+/* ── MTF Consensus panel ───────────────────────────────────────────── */
+async function loadMTFSignal() {
+  if (!activeTicker) return;
+  const lbl = document.getElementById('mtf-loading');
+  if (lbl) lbl.textContent = 'loading…';
 
+  try {
+    const r = await fetch(`/api/mtf_signal?ticker=${activeTicker}`);
+    const d = await r.json();
+    if (lbl) lbl.textContent = '';
+
+    if (!d.ok) {
+      const badge = document.getElementById('mtf-badge');
+      badge.className   = 'mtf-badge mtf-neutral';
+      badge.textContent = '!';
+      return;
+    }
+
+    // ── Consensus badge ──────────────────────────────────────────────
+    const badge = document.getElementById('mtf-badge');
+    const cons  = d.consensus || 'NEUTRAL';
+    const clsMap = {
+      'LONG':       'mtf-long',
+      'SHORT':      'mtf-short',
+      'LEAN_LONG':  'mtf-lean-long',
+      'LEAN_SHORT': 'mtf-lean-short',
+      'NEUTRAL':    'mtf-neutral',
+    };
+    badge.className   = 'mtf-badge ' + (clsMap[cons] || 'mtf-neutral');
+    badge.textContent = cons.replace('_', ' ');
+
+    // ── Long / Short percentages & bar ──────────────────────────────
+    const lp = (d.long_pct  || 0);
+    const sp = (d.short_pct || 0);
+    document.getElementById('mtf-long-pct').textContent  = lp.toFixed(0);
+    document.getElementById('mtf-short-pct').textContent = sp.toFixed(0);
+    document.getElementById('mtf-bar-long').style.width  = lp + '%';
+    document.getElementById('mtf-bar-short').style.width = sp + '%';
+
+    // ── Per-TF rows ──────────────────────────────────────────────────
+    const grid = document.getElementById('mtf-tf-rows');
+    grid.innerHTML = '';
+    const tfOrder = ['3m', '5m', '15m', '30m'];
+    for (const itvl of tfOrder) {
+      const tf     = (d.timeframes || {})[itvl];
+      const isSupp = (itvl === '30m');
+
+      const dir    = tf ? tf.direction : null;
+      const dirCls = dir === 'BUY'  ? 'mtf-dir-buy'
+                   : dir === 'SELL' ? 'mtf-dir-sell'
+                   : 'mtf-dir-none';
+
+      const trend    = tf ? tf.trend : null;
+      const trendDot = trend === 'bullish'
+        ? `<span class="mtf-trend-dot" style="color:var(--bull)">●</span>`
+        : trend === 'bearish'
+        ? `<span class="mtf-trend-dot" style="color:var(--bear)">●</span>`
+        : `<span class="mtf-trend-dot" style="color:var(--muted)">○</span>`;
+
+      const rrTxt  = tf && tf.risk_reward != null
+        ? `<span class="mtf-tf-rr">${tf.risk_reward.toFixed(1)}:1</span>` : '';
+      const zoneTxt = tf && tf.at_zone
+        ? `<span class="mtf-zone-flag" title="Price at FVG zone">⚡</span>` : '';
+      const suppTxt = isSupp
+        ? `<span class="mtf-supp-lbl">(supp)</span>` : '';
+
+      const row = document.createElement('div');
+      row.className = 'mtf-tf-row';
+      row.innerHTML = `
+        <span class="mtf-tf-label">${itvl}</span>
+        ${trendDot}
+        <span class="mtf-dir ${dirCls}">${dir || '—'}</span>
+        ${rrTxt}${zoneTxt}${suppTxt}`;
+      grid.appendChild(row);
+    }
+
+    // ── Best consensus levels ────────────────────────────────────────
+    if (d.entry != null) {
+      document.getElementById('mtf-entry').textContent = '$' + d.entry.toFixed(2);
+      document.getElementById('mtf-sl').textContent    = d.stop_loss   != null ? '$' + d.stop_loss.toFixed(2)   : '—';
+      document.getElementById('mtf-tp').textContent    = d.take_profit != null ? '$' + d.take_profit.toFixed(2) : '—';
+      document.getElementById('mtf-rr').textContent    = d.risk_reward != null ? d.risk_reward.toFixed(2) + ':1' : '—';
+    } else {
+      ['mtf-entry','mtf-sl','mtf-tp','mtf-rr'].forEach(id => {
+        document.getElementById(id).textContent = '—';
+      });
+    }
+
+    // ── Source TF info ───────────────────────────────────────────────
+    const parts = [];
+    if (d.entry_tf)  parts.push('Entry: ' + d.entry_tf);
+    if (d.target_tf) parts.push('Target: ' + d.target_tf);
+    document.getElementById('mtf-src').textContent = parts.join(' · ');
+
+  } catch (err) {
+    if (lbl) lbl.textContent = 'error';
+    console.error('loadMTFSignal error:', err);
+  }
+}
 /* ── AI Signal panel ────────────────────────────────────────────────── */
 async function loadSignal() {
   if (!activeTicker) return;

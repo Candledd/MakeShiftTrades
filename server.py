@@ -370,6 +370,53 @@ def api_signal():
         return jsonify({"ok": False, "error": f"Server error: {exc}"}), 500
 
 
+# ── Multi-Timeframe Consensus API ─────────────────────────────────────────────
+
+@app.route("/api/mtf_signal")
+def api_mtf_signal():
+    """
+    Multi-timeframe consensus signal.
+
+    Cross-references 3m, 5m, and 15m (equal weight 1.0 each) with
+    30m as a supplementary layer (weight 0.4 — adds conviction only).
+
+    Query params: ticker
+    Response JSON keys:
+      ok, ticker, consensus, consensus_score, long_pct, short_pct,
+      entry, stop_loss, take_profit, risk_reward, entry_tf, target_tf,
+      timeframes : { "3m": {...}, "5m": {...}, "15m": {...}, "30m": {...} }
+    """
+    ticker = request.args.get("ticker", "SPY").strip().upper()
+
+    try:
+        from src.mtf import MultiTimeframeAnalysis
+        import config as _cfg
+        mtf    = MultiTimeframeAnalysis(ticker, ms_term=_cfg.MTF_MS_TERM, min_rr=_cfg.MTF_MIN_RR)
+        result = mtf.analyze()
+
+        return jsonify({
+            "ok":              True,
+            "ticker":          ticker,
+            "consensus":       result.consensus,
+            "consensus_score": result.consensus_score,
+            "long_pct":        result.long_pct,
+            "short_pct":       result.short_pct,
+            "entry":           result.entry,
+            "stop_loss":       result.stop_loss,
+            "take_profit":     result.take_profit,
+            "risk_reward":     result.risk_reward,
+            "entry_tf":        result.entry_tf,
+            "target_tf":       result.target_tf,
+            "timeframes":      result.timeframes,
+        })
+
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"Server error: {exc}"}), 500
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
