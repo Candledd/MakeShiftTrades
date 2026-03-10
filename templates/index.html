@@ -234,12 +234,7 @@ header {
 .pip-on  { background: var(--accent); }
 .pip-off { background: var(--border); }
 
-/* ── MTF Consensus card ─────────────────────────────────────────────────── */
-#mtf-card {
-  border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 12px 13px; background: var(--surface2); flex-shrink: 0;
-}
-#mtf-card h3 { margin-bottom: 8px; }
+/* ── MTF Consensus (embedded inside signal card) ──────────────────── */
 .mtf-head-row {
   display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
 }
@@ -330,10 +325,6 @@ header {
         <button class="itvl-btn"        data-itvl="3m"  onclick="setItvl('3m')">3m</button>
         <button class="itvl-btn"        data-itvl="5m"  onclick="setItvl('5m')">5m</button>
         <button class="itvl-btn"        data-itvl="15m" onclick="setItvl('15m')">15m</button>
-        <button class="itvl-btn"        data-itvl="30m" onclick="setItvl('30m')">30m</button>
-        <button class="itvl-btn"        data-itvl="1h"  onclick="setItvl('1h')">1h</button>
-        <button class="itvl-btn"        data-itvl="1d"  onclick="setItvl('1d')">1D</button>
-        <button class="itvl-btn"        data-itvl="1wk" onclick="setItvl('1wk')">1W</button>
       </div>
       <button class="refresh-now-btn" onclick="manualRefresh()">↻ Refresh</button>
       <button id="ar-btn" class="ar-btn active" onclick="toggleAR()">Auto: On</button>
@@ -351,52 +342,7 @@ header {
   <!-- ── Indicator panel ── -->
   <aside class="ind-panel">
 
-    <!-- ── MTF Consensus card ── -->
-    <div id="mtf-card">
-      <h3>MTF Consensus
-        <span id="mtf-loading" style="color:var(--muted);font-size:9px;font-weight:400;font-style:italic"></span>
-      </h3>
-
-      <div class="mtf-head-row">
-        <div id="mtf-badge" class="mtf-badge mtf-neutral">···</div>
-        <div class="mtf-score-txt">
-          <span style="color:var(--bull)">▲&thinsp;<span id="mtf-long-pct">—</span>%</span>
-          &nbsp;/&nbsp;
-          <span style="color:var(--bear)">▼&thinsp;<span id="mtf-short-pct">—</span>%</span>
-        </div>
-      </div>
-
-      <div class="mtf-bar-wrap">
-        <div id="mtf-bar-long"  class="mtf-bar-long"  style="width:0%"></div>
-        <div id="mtf-bar-short" class="mtf-bar-short" style="width:0%"></div>
-      </div>
-
-      <!-- Per-TF rows injected by JS -->
-      <div class="mtf-tf-grid" id="mtf-tf-rows"></div>
-
-      <div class="mtf-levels">
-        <div class="level-row">
-          <span class="level-lbl">Entry</span>
-          <span id="mtf-entry" class="level-val">—</span>
-        </div>
-        <div class="level-row">
-          <span class="level-lbl">Stop</span>
-          <span id="mtf-sl" class="level-val sell-col">—</span>
-        </div>
-        <div class="level-row">
-          <span class="level-lbl">Target</span>
-          <span id="mtf-tp" class="level-val buy-col">—</span>
-        </div>
-        <div class="level-row">
-          <span class="level-lbl">R/R</span>
-          <span id="mtf-rr" class="level-val">—</span>
-        </div>
-      </div>
-
-      <div id="mtf-src" class="mtf-src"></div>
-    </div>
-
-    <!-- ── AI Signal card ── -->
+    <!-- ── AI Signal + MTF card ── -->
     <div id="signal-card">
       <h3>AI Signal</h3>
       <div id="sig-badge" class="signal-badge signal-wait">···</div>
@@ -445,6 +391,45 @@ header {
 
       <div id="sig-reason" class="sig-reason"></div>
       <div id="sig-status" class="sig-status">Select a ticker</div>
+
+      <!-- ── MTF Consensus (inline section) ── -->
+      <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:9px">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px">
+          <span style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:700">MTF Consensus</span>
+          <span id="mtf-loading" style="color:var(--muted);font-size:9px;font-style:italic"></span>
+          <span style="margin-left:auto;font-size:10px">
+            <span style="color:var(--bull)">▲ <span id="mtf-long-pct">—</span>%</span>
+            &nbsp;<span style="color:var(--bear)">▼ <span id="mtf-short-pct">—</span>%</span>
+          </span>
+        </div>
+        <div style="display:flex;align-items:center;gap:7px;margin-bottom:6px">
+          <div id="mtf-badge" class="mtf-badge mtf-neutral">···</div>
+        </div>
+        <div class="mtf-bar-wrap">
+          <div id="mtf-bar-long"  class="mtf-bar-long"  style="width:0%"></div>
+          <div id="mtf-bar-short" class="mtf-bar-short" style="width:0%"></div>
+        </div>
+        <div class="mtf-tf-grid" id="mtf-tf-rows"></div>
+        <div class="mtf-levels">
+          <div class="level-row">
+            <span class="level-lbl">Entry</span>
+            <span id="mtf-entry" class="level-val">—</span>
+          </div>
+          <div class="level-row">
+            <span class="level-lbl">Stop</span>
+            <span id="mtf-sl" class="level-val sell-col">—</span>
+          </div>
+          <div class="level-row">
+            <span class="level-lbl">Target</span>
+            <span id="mtf-tp" class="level-val buy-col">—</span>
+          </div>
+          <div class="level-row">
+            <span class="level-lbl">R/R</span>
+            <span id="mtf-rr" class="level-val">—</span>
+          </div>
+        </div>
+        <div id="mtf-src" class="mtf-src"></div>
+      </div>
     </div>
 
     <div>
@@ -539,11 +524,113 @@ let _rafTestPrice = 0;
 let _prevX        = null;
 let _prevY        = null;
 let _vrDebounce   = null;
+// Track candle count so we can shift the logical range on refresh
+let _candleCount  = 0;
+let _stateSaveDebounce = null;
+let _chartLoadSeq = 0;
+let _signalLoadSeq = 0;
+let _mtfLoadSeq = 0;
+
+const UI_STATE_KEY = 'makeshifttrades.chartState';
 
 const PERIOD = {
   '1m':'1d', '3m':'5d', '5m':'5d', '15m':'1mo',
-  '30m':'1mo', '1h':'3mo', '1d':'1y', '1wk':'2y',
 };
+
+function getStoredState() {
+  try {
+    const raw = window.localStorage.getItem(UI_STATE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (err) {
+    console.warn('Unable to read chart state:', err);
+    return {};
+  }
+}
+
+function saveStoredState(nextState) {
+  try {
+    window.localStorage.setItem(UI_STATE_KEY, JSON.stringify(nextState));
+  } catch (err) {
+    console.warn('Unable to save chart state:', err);
+  }
+}
+
+function persistUIState(overrides = {}) {
+  const current = getStoredState();
+  saveStoredState({
+    ...current,
+    ticker: activeTicker,
+    interval: activeItvl,
+    arEnabled,
+    ...overrides,
+  });
+}
+
+function clearPersistedView() {
+  persistUIState({ view: null });
+}
+
+function persistViewState(candleCount = _candleCount) {
+  if (!chart || !activeTicker || !activeItvl || candleCount <= 0) return;
+  const timeRange = chart.timeScale().getVisibleRange();
+  if (!timeRange) return;
+
+  persistUIState({
+    view: {
+      ticker: activeTicker,
+      interval: activeItvl,
+      candleCount,
+      timeRange: {
+        from: timeRange.from,
+        to: timeRange.to,
+      },
+    },
+  });
+}
+
+function queuePersistViewState() {
+  clearTimeout(_stateSaveDebounce);
+  _stateSaveDebounce = setTimeout(() => persistViewState(), 120);
+}
+
+function getRestorableViewState(ticker = activeTicker, interval = activeItvl) {
+  const state = getStoredState();
+  const view = state.view;
+  if (!view) return null;
+  if (view.ticker !== ticker || view.interval !== interval) return null;
+  if (!view.timeRange || typeof view.timeRange.from !== 'number' || typeof view.timeRange.to !== 'number') {
+    return null;
+  }
+  return view;
+}
+
+function syncTickerButtons() {
+  document.querySelectorAll('.ticker-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.ticker === activeTicker);
+  });
+}
+
+function syncIntervalButtons() {
+  document.querySelectorAll('.itvl-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.itvl === activeItvl);
+  });
+}
+
+function applyPersistedUIState() {
+  const state = getStoredState();
+  if (state.interval && PERIOD[state.interval]) {
+    activeItvl = state.interval;
+  }
+  if (typeof state.arEnabled === 'boolean') {
+    arEnabled = state.arEnabled;
+  }
+  if (state.ticker) {
+    activeTicker = state.ticker;
+  }
+
+  syncIntervalButtons();
+  syncTickerButtons();
+}
 
 
 /* ── Chart init ─────────────────────────────────────────────────────────── */
@@ -595,6 +682,10 @@ function initChart() {
   chart.timeScale().subscribeVisibleTimeRangeChange(() => {
     clearTimeout(_vrDebounce);
     _vrDebounce = setTimeout(() => { applyMarkers(); drawCanvas(); }, 30);
+  });
+
+  chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+    queuePersistViewState();
   });
 
   // RAF loop detects Y price-scale drag (not covered by subscribeVisibleTimeRangeChange)
@@ -813,39 +904,56 @@ function applyAll() { applyMarkers(); drawCanvas(); }
 /* ── Data loading ───────────────────────────────────────────────────────── */
 async function loadChart(preserveView = false) {
   if (!activeTicker) return;
-  const period = PERIOD[activeItvl] || '5d';
+  const requestId = ++_chartLoadSeq;
+  const requestedTicker = activeTicker;
+  const requestedItvl = activeItvl;
+  const period = PERIOD[requestedItvl] || '5d';
   const cover  = document.getElementById('loading-cover');
 
   if (!preserveView) {
     cover.classList.add('show');
-    document.getElementById('chart-title').textContent = activeTicker + ' — loading…';
+    document.getElementById('chart-title').textContent = requestedTicker + ' — loading…';
   }
 
-  let savedRange = null;
-  if (preserveView && chart) savedRange = chart.timeScale().getVisibleLogicalRange();
+  // Capture the visible TIME RANGE before any setData() calls.
+  // Using getVisibleRange() (UTC time values) instead of getVisibleLogicalRange()
+  // (bar indices) means we never need to calculate a "shift" — time values are
+  // absolute and survive candle count changes between fetches.
+  let savedTimeRange = null;
+  const prevCandleCount = _candleCount;
+  if (preserveView && chart && prevCandleCount > 0) {
+    savedTimeRange = chart.timeScale().getVisibleRange();
+  }
 
   try {
     // ── Candles ──
-    const cr = await fetch(`/api/candles?ticker=${activeTicker}&interval=${activeItvl}&period=${period}`);
+    const cr = await fetch(`/api/candles?ticker=${requestedTicker}&interval=${requestedItvl}&period=${period}`);
     const cd = await cr.json();
+    if (requestId !== _chartLoadSeq || requestedTicker !== activeTicker || requestedItvl !== activeItvl) return;
     if (!cd.ok) { showErr(cd.error); return; }
     const candles = cd.candles;
     if (!candles || !candles.length) { showErr('No data for this ticker / interval.'); return; }
 
+    // restoreRange() re-pins the viewport using the saved UTC time range after
+    // every setData() call. Because time values are absolute, no shift math is
+    // needed even when the candle count changes between refreshes.
+    const restoreRange = () => {
+      if (preserveView && savedTimeRange) {
+        chart.timeScale().setVisibleRange(savedTimeRange);
+      }
+    };
+
     cSeries.setData(candles.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
+    restoreRange();
     vSeries.setData(candles.map(c => ({
       time: c.time, value: c.volume,
       color: c.close >= c.open ? '#26a69a30' : '#ef444430',
     })));
+    restoreRange();
 
     _rafTestTime  = candles[candles.length - 1].time;
     _rafTestPrice = candles[candles.length - 1].close;
-
-    if (preserveView && savedRange) {
-      chart.timeScale().setVisibleLogicalRange(savedRange);
-    } else {
-      chart.timeScale().fitContent();
-    }
+    _candleCount  = candles.length;
 
     // Title bar
     const last = candles[candles.length - 1];
@@ -858,28 +966,72 @@ async function loadChart(preserveView = false) {
       `<span style="font-size:13px;font-weight:400;color:#94a3b8;margin-left:6px">$${last.close.toFixed(2)}</span>` +
       `<span style="font-size:12px;color:${col};margin-left:4px">${arr} ${Math.abs(chg)}%</span>`;
     document.getElementById('status-bar').textContent =
-      `${candles.length} candles · Vol: ${last.volume.toLocaleString()} · ${activeTicker} ${activeItvl}`;
+      `${candles.length} candles · Vol: ${last.volume.toLocaleString()} · ${requestedTicker} ${requestedItvl}`;
 
     // ── Indicators ──
     const indStr = [...activeInds].join(',');
-    const ir = await fetch(`/api/indicators?ticker=${activeTicker}&interval=${activeItvl}&period=${period}&indicators=${indStr}`);
+    const ir = await fetch(`/api/indicators?ticker=${requestedTicker}&interval=${requestedItvl}&period=${period}&indicators=${indStr}`);
     const id = await ir.json();
+    if (requestId !== _chartLoadSeq || requestedTicker !== activeTicker || requestedItvl !== activeItvl) return;
     if (id.ok) {
       indData = id;
       if (vwapSeries) {
         vwapSeries.setData(id.vwap && activeInds.has('vwap') ? id.vwap : []);
         vwapSeries.applyOptions({ visible: activeInds.has('vwap') });
       }
+      restoreRange();
       applyAll();
+      restoreRange();
     }
-    loadSignal();         // refresh AI signal panel
-    loadMTFSignal();      // refresh MTF consensus panel
+
+    // ── Restore / initialise viewport ─────────────────────────────────────
+    // Apply synchronously first (minimises visible flash), then re-apply via
+    // a double-RAF to override LightweightCharts' internal fitContent() which
+    // is queued in frame N+1 after every setData() call.
+    const restoredView = getRestorableViewState(requestedTicker, requestedItvl);
+
+    if (preserveView && savedTimeRange) {
+      chart.timeScale().setVisibleRange(savedTimeRange);
+    } else if (restoredView) {
+      chart.timeScale().setVisibleRange(restoredView.timeRange);
+    } else {
+      // First load: show the most recent 150 candles at a readable zoom.
+      chart.timeScale().setVisibleLogicalRange({
+        from: Math.max(0, candles.length - 150),
+        to:   candles.length,
+      });
+    }
+
+    persistViewState(candles.length);
+    persistUIState();
+
+    loadSignal();         // refresh AI + MTF panels (MTF fired inside loadSignal)
+
+    // Double-RAF: override the internal fitContent() that LightweightCharts
+    // queues in frame N+1 after setData(). Frame N+2 is guaranteed to run after.
+    const _deferTR = preserveView && savedTimeRange ? savedTimeRange
+                   : restoredView                   ? restoredView.timeRange
+                   : null;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (requestId !== _chartLoadSeq || !chart) return;
+      if (_deferTR) {
+        chart.timeScale().setVisibleRange(_deferTR);
+      } else {
+        chart.timeScale().setVisibleLogicalRange({
+          from: Math.max(0, _candleCount - 150),
+          to:   _candleCount,
+        });
+      }
+    }));
 
   } catch (err) {
+    if (requestId !== _chartLoadSeq) return;
     showErr('Network error — check console.');
     console.error(err);
   } finally {
-    cover.classList.remove('show');
+    if (requestId === _chartLoadSeq) {
+      cover.classList.remove('show');
+    }
   }
 }
 
@@ -901,9 +1053,10 @@ function resetPriceScale() {
 
 function selectTicker(t) {
   activeTicker = t;
-  document.querySelectorAll('.ticker-btn').forEach(b => b.classList.remove('active'));
-  document.querySelector(`[data-ticker="${t}"]`).classList.add('active');
+  syncTickerButtons();
   resetPriceScale();
+  _candleCount = 0;
+  clearPersistedView();
   indData = {}; if (cSeries) cSeries.setMarkers([]);
   if (vwapSeries) vwapSeries.setData([]);
   loadChart(false); startAR();
@@ -911,10 +1064,11 @@ function selectTicker(t) {
 
 function setItvl(i) {
   activeItvl = i;
-  document.querySelectorAll('.itvl-btn').forEach(b => b.classList.remove('active'));
-  document.querySelector(`[data-itvl="${i}"]`).classList.add('active');
+  syncIntervalButtons();
+  clearPersistedView();
   if (activeTicker) {
     resetPriceScale();
+    _candleCount = 0;
     indData = {}; if (cSeries) cSeries.setMarkers([]);
     if (vwapSeries) vwapSeries.setData([]);
     loadChart(false); startAR();
@@ -962,6 +1116,7 @@ function updateARLabel() {
 
 function toggleAR() {
   arEnabled = !arEnabled;
+  persistUIState();
   const label = arEnabled ? 'Auto: On' : 'Auto: Off';
   for (const id of ['ar-btn', 'hdr-ar']) {
     const el = document.getElementById(id);
@@ -975,12 +1130,15 @@ function toggleAR() {
 /* ── MTF Consensus panel ───────────────────────────────────────────── */
 async function loadMTFSignal() {
   if (!activeTicker) return;
+  const requestId = ++_mtfLoadSeq;
+  const requestedTicker = activeTicker;
   const lbl = document.getElementById('mtf-loading');
   if (lbl) lbl.textContent = 'loading…';
 
   try {
-    const r = await fetch(`/api/mtf_signal?ticker=${activeTicker}`);
+    const r = await fetch(`/api/mtf_signal?ticker=${requestedTicker}&interval=${activeItvl}`);
     const d = await r.json();
+    if (requestId !== _mtfLoadSeq || requestedTicker !== activeTicker) return;
     if (lbl) lbl.textContent = '';
 
     if (!d.ok) {
@@ -1014,10 +1172,13 @@ async function loadMTFSignal() {
     // ── Per-TF rows ──────────────────────────────────────────────────
     const grid = document.getElementById('mtf-tf-rows');
     grid.innerHTML = '';
-    const tfOrder = ['3m', '5m', '15m', '30m'];
+    const allTFs  = ['1m', '3m', '5m', '15m'];
+    const tfCutoff = allTFs.indexOf(activeItvl);
+    const tfOrder  = allTFs.slice(tfCutoff >= 0 ? tfCutoff : 0);
     for (const itvl of tfOrder) {
-      const tf     = (d.timeframes || {})[itvl];
-      const isSupp = (itvl === '30m');
+      const tf      = (d.timeframes || {})[itvl];
+      const isEntry = (itvl === activeItvl);
+      const isSupp  = (itvl === '15m');
 
       const dir    = tf ? tf.direction : null;
       const dirCls = dir === 'BUY'  ? 'mtf-dir-buy'
@@ -1035,8 +1196,9 @@ async function loadMTFSignal() {
         ? `<span class="mtf-tf-rr">${tf.risk_reward.toFixed(1)}:1</span>` : '';
       const zoneTxt = tf && tf.at_zone
         ? `<span class="mtf-zone-flag" title="Price at FVG zone">⚡</span>` : '';
-      const suppTxt = isSupp
-        ? `<span class="mtf-supp-lbl">(supp)</span>` : '';
+      const suppTxt = isEntry ? `<span class="mtf-supp-lbl">(entry)</span>`
+                    : isSupp  ? `<span class="mtf-supp-lbl">(htf)</span>`
+                    : '';
 
       const row = document.createElement('div');
       row.className = 'mtf-tf-row';
@@ -1067,6 +1229,7 @@ async function loadMTFSignal() {
     document.getElementById('mtf-src').textContent = parts.join(' · ');
 
   } catch (err) {
+    if (requestId !== _mtfLoadSeq) return;
     if (lbl) lbl.textContent = 'error';
     console.error('loadMTFSignal error:', err);
   }
@@ -1074,7 +1237,10 @@ async function loadMTFSignal() {
 /* ── AI Signal panel ────────────────────────────────────────────────── */
 async function loadSignal() {
   if (!activeTicker) return;
-  const period = PERIOD[activeItvl] || '5d';
+  const requestId = ++_signalLoadSeq;
+  const requestedTicker = activeTicker;
+  const requestedItvl = activeItvl;
+  const period = PERIOD[requestedItvl] || '5d';
   const badge  = document.getElementById('sig-badge');
   const status = document.getElementById('sig-status');
 
@@ -1084,9 +1250,10 @@ async function loadSignal() {
 
   try {
     const r = await fetch(
-      `/api/signal?ticker=${activeTicker}&interval=${activeItvl}&period=${period}`
+      `/api/signal?ticker=${requestedTicker}&interval=${requestedItvl}&period=${period}`
     );
     const d = await r.json();
+    if (requestId !== _signalLoadSeq || requestedTicker !== activeTicker || requestedItvl !== activeItvl) return;
 
     if (!d.ok) {
       badge.textContent = '!';
@@ -1169,7 +1336,11 @@ async function loadSignal() {
     // ── Reason text ──────────────────────────────────────────────
     document.getElementById('sig-reason').textContent = smc.reason || '';
 
+    // Kick off MTF fetch — updates the inline MTF section below
+    loadMTFSignal();
+
   } catch (err) {
+    if (requestId !== _signalLoadSeq) return;
     document.getElementById('sig-badge').textContent  = '!';
     document.getElementById('sig-status').textContent = 'Network error';
     console.error('loadSignal error:', err);
@@ -1179,10 +1350,21 @@ async function loadSignal() {
 /* ── Startup ────────────────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {
   initChart();
+  applyPersistedUIState();
   ['ar-btn','hdr-ar'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('active', arEnabled);
   });
+  updateARLabel();
+  if (activeTicker) {
+    loadChart(false);
+    startAR();
+  }
+});
+
+window.addEventListener('beforeunload', () => {
+  persistViewState();
+  persistUIState();
 });
 </script>
 </body>

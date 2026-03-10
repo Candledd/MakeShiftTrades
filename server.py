@@ -260,23 +260,16 @@ def api_signal():
     try:
         df = fetch_ohlcv(ticker, period=period, interval=interval)
 
-        # ── SMC signal (strict: price must be at/near FVG) ──────────────
+        # ── SMC signal ──────────────────────────────────────────────
         from src.strategy import SMCStrategy
-        from charts.indicators.levels import detect_equilibrium
         strategy     = SMCStrategy(ticker, interval=interval, period=period)
         strict_sig   = strategy.analyze(df)
-        # Fallback: best nearby FVG setup even if price hasn't reached it
         smc_signal   = strict_sig or strategy.find_setup(df)
         price_at_zone = strict_sig is not None
 
-        smc_dir   = smc_signal.direction if smc_signal else None
+        smc_dir = smc_signal.direction if smc_signal else None
 
-        # ── Enhanced SMC scoring (0-6) ──────────────────────────────────
-        # +2 always when a signal fires (trend confirmed + FVG aligned)
-        # +1 Order Block confluent with FVG
-        # +1 Engulfing pattern at zone
-        # +1 Price is currently AT the FVG zone (strict entry condition met)
-        # +1 Price in discount (for longs) or premium (for shorts)
+        # ── Enhanced SMC scoring (0-6) ──────────────────────────────
         smc_score = 0
         if smc_signal:
             smc_score = 2
@@ -290,9 +283,9 @@ def api_signal():
                 eq = detect_equilibrium(df)
                 if eq:
                     cur = float(df["Close"].iloc[-1])
-                    if smc_dir == "BUY"  and cur < eq["eq"]:   # price in discount
+                    if smc_dir == "BUY"  and cur < eq["eq"]:
                         smc_score += 1
-                    elif smc_dir == "SELL" and cur > eq["eq"]: # price in premium
+                    elif smc_dir == "SELL" and cur > eq["eq"]:
                         smc_score += 1
             except Exception:
                 pass
@@ -304,54 +297,43 @@ def api_signal():
             "take_profit":   smc_signal.take_profit if smc_signal else None,
             "risk_reward":   smc_signal.risk_reward if smc_signal else None,
             "confidence":    smc_signal.confidence  if smc_signal else None,
-            "reason":        smc_signal.reason       if smc_signal else None,
+            "reason":        smc_signal.reason      if smc_signal else None,
             "smc_score":     smc_score,
             "price_at_zone": price_at_zone,
         }
 
-        # ── ML signal ───────────────────────────────────────────────────
+        # ── ML signal ───────────────────────────────────────────────
         ml_result = _get_ml_model().predict(df)
         ml_dir    = ml_result["signal"]
         ml_conf   = ml_result["confidence"]
 
-        # ── Combine SMC + ML (scoring out of 6 now) ─────────────────────
-        score_boost = smc_score / 6   # normalised 0-1
+        # ── Combine SMC + ML ─────────────────────────────────────────
+        score_boost = smc_score / 6
 
         if price_at_zone and smc_dir and smc_dir == ml_dir:
-            # Strongest case: price at FVG, both agree
             final_signal = smc_dir
             final_conf   = min(100.0, ml_conf + 25.0 * score_boost)
             alignment    = "aligned"
         elif price_at_zone and smc_dir:
-            # Price at FVG, ML neutral/disagrees → trust SMC
             final_signal = smc_dir
             final_conf   = min(100.0, ml_conf + 12.0 * score_boost)
             alignment    = "smc_only"
         elif smc_dir and smc_dir == ml_dir:
-            # Pending setup, ML agrees
             final_signal = smc_dir
             final_conf   = ml_conf * 0.90
             alignment    = "aligned"
         elif smc_dir and ml_dir != "HOLD" and smc_dir != ml_dir:
-            # Disagree → be conservative
             final_signal = ml_dir
             final_conf   = ml_conf * 0.70
             alignment    = "disagreement"
         elif smc_dir:
-            # Pending SMC setup, ML says HOLD
             final_signal = smc_dir
-            final_conf   = ml_conf * 0.78
+            final_conf   = min(100.0, ml_conf * 0.80 + 5.0 * score_boost)
             alignment    = "smc_only"
         else:
-            # No SMC setup at all; rely on ML only
             final_signal = ml_dir
             final_conf   = ml_conf
             alignment    = "ml_only"
-
-        # ── 60% confidence gate ─────────────────────────────────────────
-        # Only emit a directional call when confidence is high enough
-        if final_signal in ("BUY", "SELL") and final_conf < 60.0:
-            final_signal = "HOLD"
 
         return jsonify({
             "ok":         True,
@@ -377,21 +359,19 @@ def api_mtf_signal():
     """
     Multi-timeframe consensus signal.
 
-    Cross-references 3m, 5m, and 15m (equal weight 1.0 each) with
-    30m as a supplementary layer (weight 0.4 — adds conviction only).
-
-    Query params: ticker
+    Query params: ticker, interval
     Response JSON keys:
       ok, ticker, consensus, consensus_score, long_pct, short_pct,
       entry, stop_loss, take_profit, risk_reward, entry_tf, target_tf,
-      timeframes : { "3m": {...}, "5m": {...}, "15m": {...}, "30m": {...} }
+      timeframes : { "1m": {...}, "3m": {...}, "5m": {...}, "15m": {...} }
     """
-    ticker = request.args.get("ticker", "SPY").strip().upper()
+    ticker   = request.args.get("ticker",   "SPY").strip().upper()
+    interval = request.args.get("interval", "1m")
 
     try:
         from src.mtf import MultiTimeframeAnalysis
         import config as _cfg
-        mtf    = MultiTimeframeAnalysis(ticker, ms_term=_cfg.MTF_MS_TERM, min_rr=_cfg.MTF_MIN_RR)
+        mtf    = MultiTimeframeAnalysis(ticker, active_interval=interval, ms_term=_cfg.MTF_MS_TERM, min_rr=_cfg.MTF_MIN_RR)
         result = mtf.analyze()
 
         return jsonify({
