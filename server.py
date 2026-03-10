@@ -28,6 +28,12 @@ from charts.indicators.price_action import (
     detect_market_structure,
     detect_order_blocks,
 )
+from charts.indicators.levels import (
+    detect_key_levels,
+    detect_vwap,
+    detect_sessions,
+    detect_equilibrium,
+)
 
 app = Flask(__name__)
 
@@ -187,6 +193,18 @@ def api_indicators():
                 }
                 for _, row in sw_df.iterrows()
             ]
+
+        if "key_levels" in active:
+            result["key_levels"] = detect_key_levels(df)
+
+        if "vwap" in active:
+            result["vwap"] = detect_vwap(df)
+
+        if "sessions" in active:
+            result["sessions"] = detect_sessions(df)
+
+        if "equilibrium" in active:
+            result["equilibrium"] = detect_equilibrium(df)
 
         return jsonify({"ok": True, **result})
 

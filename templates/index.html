@@ -363,6 +363,20 @@ header {
         <span class="dot" style="background:#f23645"></span>
         <span class="dot" style="background:#089981"></span>Swing H/L
       </button>
+      <button class="ind-btn on" id="ind-key_levels" onclick="toggleInd('key_levels')">
+        <span class="dot" style="background:#f23645"></span>
+        <span class="dot" style="background:#089981"></span>Key Levels
+      </button>
+      <button class="ind-btn on" id="ind-vwap"       onclick="toggleInd('vwap')">
+        <span class="dot" style="background:#ff6b6b"></span>VWAP
+      </button>
+      <button class="ind-btn on" id="ind-sessions"   onclick="toggleInd('sessions')">
+        <span class="dot" style="background:#3b82f6"></span>
+        <span class="dot" style="background:#ffa500"></span>Sessions
+      </button>
+      <button class="ind-btn on" id="ind-equilibrium" onclick="toggleInd('equilibrium')">
+        <span class="dot" style="background:#94a3b8"></span>Equilibrium
+      </button>
     </div>
 
     <div class="legend">
@@ -379,6 +393,14 @@ header {
       <div class="leg-row"><span style="color:#089981;font-size:14px;line-height:1">▲</span>Swing Low</div>
       <div class="leg-row"><span style="color:#ffa726;font-weight:700;font-size:12px">C</span>CHoCH</div>
       <div class="leg-row"><span style="color:#29b6f6;font-weight:700;font-size:12px">B</span>BOS</div>
+      <div class="leg-row"><span class="hline" style="background:#f23645"></span>PDH / PWH</div>
+      <div class="leg-row"><span class="hline" style="background:#089981"></span>PDL / PWL</div>
+      <div class="leg-row"><span class="hline" style="background:#94a3b8"></span>PDC</div>
+      <div class="leg-row"><span class="hline" style="background:#ff6b6b"></span>VWAP</div>
+      <div class="leg-row"><span class="swatch" style="background:rgba(59,130,246,0.2)"></span>Asia KZ</div>
+      <div class="leg-row"><span class="swatch" style="background:rgba(255,165,0,0.2)"></span>London KZ</div>
+      <div class="leg-row"><span class="swatch" style="background:rgba(8,153,129,0.2)"></span>NY KZ</div>
+      <div class="leg-row"><span class="hline" style="background:#94a3b8"></span>EQ 50%</div>
     </div>
 
     <div style="margin-top:auto;font-size:11px;color:var(--muted);line-height:1.6">
@@ -394,9 +416,9 @@ let activeItvl    = '1m';
 let chart         = null;
 let cSeries       = null;   // candlestick
 let vSeries       = null;   // volume
-let priceLinesArr = [];     // active createPriceLine handles
+let vwapSeries    = null;   // VWAP line
 let indData       = {};     // latest indicator payload from /api/indicators
-let activeInds    = new Set(['fvg','ob','engulfing','liquidity','ms','swings']);
+let activeInds    = new Set(['fvg','ob','engulfing','liquidity','ms','swings','key_levels','vwap','sessions','equilibrium']);
 let arTimer       = null;
 let arCountdown   = 5;
 let arEnabled     = true;
@@ -406,6 +428,7 @@ let _rafTestTime  = 0;
 let _rafTestPrice = 0;
 let _prevX        = null;
 let _prevY        = null;
+let _vrDebounce   = null;
 
 const PERIOD = {
   '1m':'1d', '3m':'5d', '5m':'5d', '15m':'1mo',
@@ -451,7 +474,20 @@ function initChart() {
     drawCanvas();
   }).observe(wrap);
 
-  // RAF loop detects any coordinate change (X zoom/pan AND Y price-scale drag)
+  // VWAP line series
+  vwapSeries = chart.addLineSeries({
+    color: '#ff6b6b', lineWidth: 1,
+    lastValueVisible: false, priceLineVisible: false,
+    crosshairMarkerVisible: false, title: 'VWAP',
+  });
+
+  // Re-clip all zoom-aware indicators whenever the visible range changes
+  chart.timeScale().subscribeVisibleTimeRangeChange(() => {
+    clearTimeout(_vrDebounce);
+    _vrDebounce = setTimeout(() => { applyMarkers(); drawCanvas(); }, 30);
+  });
+
+  // RAF loop detects Y price-scale drag (not covered by subscribeVisibleTimeRangeChange)
   requestAnimationFrame(rafLoop);
 }
 
@@ -469,6 +505,7 @@ function rafLoop() {
 
 
 /* ── Canvas overlay (FVG + OB rectangles) ───────────────────────────────── */
+/* ── Canvas overlay ──────────────────────────────────────────────────────────────── */
 function drawCanvas() {
   const canvas = document.getElementById('overlay-canvas');
   if (!canvas || !chart || !cSeries) return;
@@ -477,8 +514,63 @@ function drawCanvas() {
   const vr = chart.timeScale().getVisibleRange();
   if (!vr) return;
 
+  // ── Session Kill Zone bands (painted first, behind everything else) ───
+  if (activeInds.has('sessions') && indData.sessions) {
+    for (const s of indData.sessions) {
+      if (s.end_time < vr.from || s.start_time > vr.to) continue;
+      let x0 = chart.timeScale().timeToCoordinate(s.start_time) ?? 0;
+      let x1 = chart.timeScale().timeToCoordinate(s.end_time)   ?? canvas.width;
+      x0 = Math.max(0, x0); x1 = Math.min(canvas.width, x1);
+      const W = Math.abs(x1 - x0);
+      if (W < 1) continue;
+      ctx.fillStyle = s.color;
+      ctx.fillRect(Math.min(x0, x1), 0, W, canvas.height);
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.fillText(s.name, Math.min(x0, x1) + 4, 14);
+    }
+  }
+
+  // ── Equilibrium / Premium-Discount bands ───────────────────────────
+  if (activeInds.has('equilibrium') && indData.equilibrium) {
+    const eq = indData.equilibrium;
+    const yH = cSeries.priceToCoordinate(eq.high);
+    const yP = cSeries.priceToCoordinate(eq.premium);
+    const yD = cSeries.priceToCoordinate(eq.discount);
+    const yL = cSeries.priceToCoordinate(eq.low);
+    if (yP !== null && yH !== null) {
+      ctx.fillStyle = 'rgba(242,54,69,0.05)';
+      ctx.fillRect(0, Math.min(yH, yP), canvas.width, Math.abs(yP - yH));
+    }
+    if (yD !== null && yL !== null) {
+      ctx.fillStyle = 'rgba(8,153,129,0.05)';
+      ctx.fillRect(0, Math.min(yL, yD), canvas.width, Math.abs(yD - yL));
+    }
+    const drawEqLine = (price, label, color, dash) => {
+      const y = cSeries.priceToCoordinate(price);
+      if (y === null) return;
+      ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1;
+      ctx.setLineDash(dash);
+      ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = color; ctx.font = '10px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(label, canvas.width - 5, y - 3);
+      ctx.textAlign = 'left';
+    };
+    drawEqLine(eq.high,     'Range H',   'rgba(242,54,69,0.7)',   [4, 4]);
+    drawEqLine(eq.low,      'Range L',   'rgba(8,153,129,0.7)',   [4, 4]);
+    drawEqLine(eq.eq,       'EQ 50%',    'rgba(148,163,184,0.8)', [2, 2]);
+    drawEqLine(eq.premium,  'Prem 75%',  'rgba(242,54,69,0.5)',   [8, 4]);
+    drawEqLine(eq.discount, 'Disc 25%',  'rgba(8,153,129,0.5)',   [8, 4]);
+  }
+
+  // ── FVG zones (only zones starting in, or active zones extending into, viewport) ─
   if (activeInds.has('fvg') && indData.fvg) {
     for (const z of indData.fvg) {
+      if (z.end_time   < vr.from) continue;              // ended before viewport
+      if (z.start_time > vr.to)   continue;              // starts after viewport
+      if (z.start_time < vr.from && z.ifvg) continue;   // old mitigated zone, skip
       const bull = z.type === 'bullish';
       const fill = bull
         ? (z.ifvg ? 'rgba(100,149,237,.08)' : 'rgba(100,149,237,.22)')
@@ -488,12 +580,54 @@ function drawCanvas() {
     }
   }
 
+  // ── Order Blocks ─────────────────────────────────────────────────────
   if (activeInds.has('ob') && indData.ob) {
     for (const ob of indData.ob) {
+      if (ob.end_time < vr.from || ob.start_time > vr.to) continue;
       const bull = ob.type === 'bullish';
       drawRect(ctx, ob.start_time, ob.end_time, ob.top, ob.bottom,
                bull ? 'rgba(8,153,129,.32)' : 'rgba(242,54,69,.32)',
                bull ? '#089981' : '#f23645', 1, [], vr, canvas);
+    }
+  }
+
+  // ── Liquidity (canvas-drawn; line starts at pivot time, extends right) ────
+  if (activeInds.has('liquidity') && indData.liquidity) {
+    for (const lv of indData.liquidity) {
+      if (lv.start_time > vr.to) continue;       // pivot in the future
+      const y = cSeries.priceToCoordinate(lv.price);
+      if (y === null) continue;
+      let x0 = chart.timeScale().timeToCoordinate(lv.start_time);
+      if (x0 === null) x0 = 0;
+      x0 = Math.max(0, x0);
+      const col = lv.dir === 'high' ? '#ffb300' : '#ab47bc';
+      ctx.beginPath(); ctx.strokeStyle = col; ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.moveTo(x0, y); ctx.lineTo(canvas.width, y);
+      ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = col; ctx.font = '10px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(lv.dir === 'high' ? '↑ Sell' : '↓ Buy', canvas.width - 4, y - 3);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  // ── Key Levels  PDH / PDL / PDC / PWH / PWL ─────────────────────────────
+  if (activeInds.has('key_levels') && indData.key_levels) {
+    for (const lv of indData.key_levels) {
+      const y = cSeries.priceToCoordinate(lv.price);
+      if (y === null) continue;
+      const col = (lv.type === 'pdh' || lv.type === 'pwh') ? '#f23645'
+                : (lv.type === 'pdl' || lv.type === 'pwl') ? '#089981'
+                : '#94a3b8';
+      ctx.beginPath(); ctx.strokeStyle = col; ctx.lineWidth = 1;
+      ctx.setLineDash([6, 3]);
+      ctx.moveTo(0, y); ctx.lineTo(canvas.width, y);
+      ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = col; ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(lv.label, canvas.width - 5, y - 3);
+      ctx.textAlign = 'left';
     }
   }
 }
@@ -522,34 +656,17 @@ function drawRect(ctx, t0, t1, pTop, pBot, fill, stroke, lw, dash, vr, canvas) {
 
 
 /* ── Price lines (Liquidity) ────────────────────────────────────────────── */
-function clearPriceLines() {
-  for (const pl of priceLinesArr) { try { cSeries.removePriceLine(pl); } catch(_) {} }
-  priceLinesArr = [];
-}
-
-function applyPriceLines() {
-  clearPriceLines();
-  if (!activeInds.has('liquidity') || !indData.liquidity) return;
-  for (const lv of indData.liquidity) {
-    priceLinesArr.push(cSeries.createPriceLine({
-      price: lv.price,
-      color: lv.dir === 'high' ? '#ffb300' : '#ab47bc',
-      lineWidth: 1,
-      lineStyle: LightweightCharts.LineStyle.Dotted,
-      axisLabelVisible: false,
-      title: lv.dir === 'high' ? '⬆ Sell' : '⬇ Buy',
-    }));
-  }
-}
-
-
-/* ── Markers (Engulfing + Swings + MS) ──────────────────────────────────── */
+/* ── Markers (Engulfing + Swings + MS)  —  filtered to visible range ───────── */
 function applyMarkers() {
   if (!cSeries) return;
-  const m = [];
+  const vr   = chart.timeScale().getVisibleRange();
+  const from = vr ? vr.from : 0;
+  const to   = vr ? vr.to   : Infinity;
+  const m    = [];
 
   if (activeInds.has('engulfing') && indData.engulfing) {
     for (const e of indData.engulfing) {
+      if (e.time < from || e.time > to) continue;
       m.push({ time: e.time,
         position: e.type === 'bullish' ? 'belowBar' : 'aboveBar',
         color:    e.type === 'bullish' ? '#00bcd4'  : '#e040fb',
@@ -559,6 +676,7 @@ function applyMarkers() {
 
   if (activeInds.has('swings') && indData.swings) {
     for (const s of indData.swings) {
+      if (s.time < from || s.time > to) continue;
       m.push({ time: s.time,
         position: s.type === 'high' ? 'aboveBar'   : 'belowBar',
         color:    s.type === 'high' ? '#f23645'     : '#089981',
@@ -569,6 +687,7 @@ function applyMarkers() {
 
   if (activeInds.has('ms') && indData.ms) {
     for (const ev of indData.ms) {
+      if (ev.time < from || ev.time > to) continue;
       m.push({ time: ev.time, position: 'belowBar',
         color: ev.color, shape: 'circle', text: ev.label, size: 0.5 });
     }
@@ -578,7 +697,7 @@ function applyMarkers() {
   cSeries.setMarkers(m);
 }
 
-function applyAll() { applyPriceLines(); applyMarkers(); drawCanvas(); }
+function applyAll() { applyMarkers(); drawCanvas(); }
 
 
 /* ── Data loading ───────────────────────────────────────────────────────── */
@@ -635,7 +754,14 @@ async function loadChart(preserveView = false) {
     const indStr = [...activeInds].join(',');
     const ir = await fetch(`/api/indicators?ticker=${activeTicker}&interval=${activeItvl}&period=${period}&indicators=${indStr}`);
     const id = await ir.json();
-    if (id.ok) { indData = id; applyAll(); }
+    if (id.ok) {
+      indData = id;
+      if (vwapSeries) {
+        vwapSeries.setData(id.vwap && activeInds.has('vwap') ? id.vwap : []);
+        vwapSeries.applyOptions({ visible: activeInds.has('vwap') });
+      }
+      applyAll();
+    }
     loadSignal();         // refresh AI signal panel
 
   } catch (err) {
@@ -667,7 +793,8 @@ function selectTicker(t) {
   document.querySelectorAll('.ticker-btn').forEach(b => b.classList.remove('active'));
   document.querySelector(`[data-ticker="${t}"]`).classList.add('active');
   resetPriceScale();
-  indData = {}; clearPriceLines(); if (cSeries) cSeries.setMarkers([]);
+  indData = {}; if (cSeries) cSeries.setMarkers([]);
+  if (vwapSeries) vwapSeries.setData([]);
   loadChart(false); startAR();
 }
 
@@ -677,15 +804,24 @@ function setItvl(i) {
   document.querySelector(`[data-itvl="${i}"]`).classList.add('active');
   if (activeTicker) {
     resetPriceScale();
-    indData = {}; clearPriceLines(); if (cSeries) cSeries.setMarkers([]);
+    indData = {}; if (cSeries) cSeries.setMarkers([]);
+    if (vwapSeries) vwapSeries.setData([]);
     loadChart(false); startAR();
   }
 }
 
 function toggleInd(name) {
   const btn = document.getElementById('ind-' + name);
-  if (activeInds.has(name)) { activeInds.delete(name); btn.classList.remove('on'); }
-  else                       { activeInds.add(name);    btn.classList.add('on');    }
+  if (activeInds.has(name)) {
+    activeInds.delete(name); btn.classList.remove('on');
+    if (name === 'vwap' && vwapSeries) vwapSeries.applyOptions({ visible: false });
+  } else {
+    activeInds.add(name); btn.classList.add('on');
+    if (name === 'vwap' && vwapSeries && indData.vwap) {
+      vwapSeries.setData(indData.vwap);
+      vwapSeries.applyOptions({ visible: true });
+    }
+  }
   applyAll();
 }
 
