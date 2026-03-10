@@ -342,6 +342,120 @@ class SMCStrategy:
         )
 
     # ------------------------------------------------------------------ #
+    # Nearest-setup finder (relaxed — price does NOT need to be at FVG)   #
+    # ------------------------------------------------------------------ #
+
+    def find_setup(self, df: Optional[pd.DataFrame] = None) -> Optional["TradeSignal"]:
+        """Return the best active SMC setup even if price hasn't reached the zone.
+
+        Unlike ``analyze()``, this does **not** require current price to be
+        at/near the FVG.  It scans all active aligned FVGs and returns the
+        first one that clears the R/R gate.  Use this to always populate the
+        Entry / Stop / Target levels on the UI.
+        """
+        if df is None:
+            df = self.fetch_data()
+
+        if len(df) < max(30, self.fvg_lookback):
+            return None
+
+        current_price = float(df["Close"].iloc[-1])
+
+        structure = detect_market_structure(df, term=self.ms_term)
+        trend     = _current_trend(structure)
+        if trend is None:
+            return None
+
+        fvg_df = detect_fvg(df)
+        if fvg_df.empty:
+            return None
+
+        recent_cutoff = df.index[-self.fvg_lookback]
+        aligned_fvgs  = fvg_df[
+            (fvg_df["active"] == True) &          # noqa: E712
+            (fvg_df["type"]   == trend) &
+            (fvg_df["date"]   >= recent_cutoff)
+        ].sort_values("date", ascending=False)
+
+        if aligned_fvgs.empty:
+            return None
+
+        order_blocks = detect_order_blocks(df, term=self.ms_term)
+        liquidity    = detect_liquidity_levels(df)
+        has_engulf   = _engulfing_at_zone(df, trend)
+
+        for _, fvg_row in aligned_fvgs.iterrows():
+            fvg_top    = float(fvg_row["top"])
+            fvg_bottom = float(fvg_row["bottom"])
+            fvg_height = fvg_top - fvg_bottom
+
+            has_ob = _ob_near_fvg(order_blocks, fvg_bottom, fvg_top, trend)
+
+            if trend == "bullish":
+                entry     = fvg_bottom
+                stop_loss = fvg_bottom - fvg_height * 0.5
+                cands     = sorted(
+                    [l for l in liquidity if l["dir"] == "high" and l["price"] > entry],
+                    key=lambda x: (x["price"] - entry),
+                )
+            else:
+                entry     = fvg_top
+                stop_loss = fvg_top + fvg_height * 0.5
+                cands     = sorted(
+                    [l for l in liquidity if l["dir"] == "low" and l["price"] < entry],
+                    key=lambda x: (entry - x["price"]),
+                )
+
+            if not cands:
+                continue
+
+            take_profit = cands[0]["price"]
+            risk        = abs(entry - stop_loss)
+            reward      = abs(take_profit - entry)
+            if risk == 0:
+                continue
+            rr = reward / risk
+            if rr < self.min_rr:
+                continue
+
+            confidence: Literal["standard", "strong"] = (
+                "strong" if (has_ob and has_engulf) else "standard"
+            )
+            direction: Literal["BUY", "SELL"] = "BUY" if trend == "bullish" else "SELL"
+
+            dist_pct = abs(current_price - entry) / max(entry, 1e-9) * 100
+            reason = (
+                f"Pending {'bullish' if trend == 'bullish' else 'bearish'} FVG "
+                f"[{fvg_bottom:.2f}–{fvg_top:.2f}] "
+                f"({dist_pct:.1f}% away) | "
+                f"OB: {'yes' if has_ob else 'no'} | "
+                f"Engulf: {'yes' if has_engulf else 'no'} | "
+                f"R/R: {rr:.2f}"
+            )
+
+            return TradeSignal(
+                direction=direction,
+                entry=round(entry, 4),
+                stop_loss=round(stop_loss, 4),
+                take_profit=round(take_profit, 4),
+                risk_reward=round(rr, 2),
+                confidence=confidence,
+                fvg_zone=(round(fvg_bottom, 4), round(fvg_top, 4)),
+                trend=trend,
+                reason=reason,
+                raw_data={
+                    "current_price": current_price,
+                    "fvg_date":      str(fvg_row["date"]),
+                    "has_ob":        has_ob,
+                    "has_engulf":    has_engulf,
+                    "ms_events":     len(structure),
+                    "price_at_zone": False,
+                },
+            )
+
+        return None
+
+    # ------------------------------------------------------------------ #
     # Convenience                                                          #
     # ------------------------------------------------------------------ #
 

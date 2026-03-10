@@ -260,29 +260,53 @@ def api_signal():
     try:
         df = fetch_ohlcv(ticker, period=period, interval=interval)
 
-        # ── SMC signal ──────────────────────────────────────────────────
+        # ── SMC signal (strict: price must be at/near FVG) ──────────────
         from src.strategy import SMCStrategy
-        strategy   = SMCStrategy(ticker, interval=interval, period=period)
-        smc_signal = strategy.analyze(df)
+        from charts.indicators.levels import detect_equilibrium
+        strategy     = SMCStrategy(ticker, interval=interval, period=period)
+        strict_sig   = strategy.analyze(df)
+        # Fallback: best nearby FVG setup even if price hasn't reached it
+        smc_signal   = strict_sig or strategy.find_setup(df)
+        price_at_zone = strict_sig is not None
 
         smc_dir   = smc_signal.direction if smc_signal else None
+
+        # ── Enhanced SMC scoring (0-6) ──────────────────────────────────
+        # +2 always when a signal fires (trend confirmed + FVG aligned)
+        # +1 Order Block confluent with FVG
+        # +1 Engulfing pattern at zone
+        # +1 Price is currently AT the FVG zone (strict entry condition met)
+        # +1 Price in discount (for longs) or premium (for shorts)
         smc_score = 0
         if smc_signal:
-            smc_score = 2  # trend + FVG always present when signal fires
+            smc_score = 2
             if smc_signal.raw_data.get("has_ob"):
                 smc_score += 1
             if smc_signal.raw_data.get("has_engulf"):
                 smc_score += 1
+            if price_at_zone:
+                smc_score += 1
+            try:
+                eq = detect_equilibrium(df)
+                if eq:
+                    cur = float(df["Close"].iloc[-1])
+                    if smc_dir == "BUY"  and cur < eq["eq"]:   # price in discount
+                        smc_score += 1
+                    elif smc_dir == "SELL" and cur > eq["eq"]: # price in premium
+                        smc_score += 1
+            except Exception:
+                pass
 
         smc_block = {
-            "signal":      smc_dir,
-            "entry":       smc_signal.entry       if smc_signal else None,
-            "stop_loss":   smc_signal.stop_loss   if smc_signal else None,
-            "take_profit": smc_signal.take_profit if smc_signal else None,
-            "risk_reward": smc_signal.risk_reward if smc_signal else None,
-            "confidence":  smc_signal.confidence  if smc_signal else None,
-            "reason":      smc_signal.reason       if smc_signal else None,
-            "smc_score":   smc_score,
+            "signal":        smc_dir,
+            "entry":         smc_signal.entry       if smc_signal else None,
+            "stop_loss":     smc_signal.stop_loss   if smc_signal else None,
+            "take_profit":   smc_signal.take_profit if smc_signal else None,
+            "risk_reward":   smc_signal.risk_reward if smc_signal else None,
+            "confidence":    smc_signal.confidence  if smc_signal else None,
+            "reason":        smc_signal.reason       if smc_signal else None,
+            "smc_score":     smc_score,
+            "price_at_zone": price_at_zone,
         }
 
         # ── ML signal ───────────────────────────────────────────────────
@@ -290,27 +314,44 @@ def api_signal():
         ml_dir    = ml_result["signal"]
         ml_conf   = ml_result["confidence"]
 
-        # ── Combine SMC + ML ────────────────────────────────────────────
-        if smc_dir and smc_dir == ml_dir:
-            # Both agree → boost confidence proportional to SMC score
+        # ── Combine SMC + ML (scoring out of 6 now) ─────────────────────
+        score_boost = smc_score / 6   # normalised 0-1
+
+        if price_at_zone and smc_dir and smc_dir == ml_dir:
+            # Strongest case: price at FVG, both agree
             final_signal = smc_dir
-            final_conf   = min(100.0, ml_conf + 15.0 * (smc_score / 4))
+            final_conf   = min(100.0, ml_conf + 25.0 * score_boost)
+            alignment    = "aligned"
+        elif price_at_zone and smc_dir:
+            # Price at FVG, ML neutral/disagrees → trust SMC
+            final_signal = smc_dir
+            final_conf   = min(100.0, ml_conf + 12.0 * score_boost)
+            alignment    = "smc_only"
+        elif smc_dir and smc_dir == ml_dir:
+            # Pending setup, ML agrees
+            final_signal = smc_dir
+            final_conf   = ml_conf * 0.90
             alignment    = "aligned"
         elif smc_dir and ml_dir != "HOLD" and smc_dir != ml_dir:
-            # Explicit disagreement → show ML, reduce confidence
+            # Disagree → be conservative
             final_signal = ml_dir
-            final_conf   = ml_conf * 0.75
+            final_conf   = ml_conf * 0.70
             alignment    = "disagreement"
         elif smc_dir:
-            # SMC fired, ML says HOLD → use SMC direction at slightly reduced confidence
+            # Pending SMC setup, ML says HOLD
             final_signal = smc_dir
-            final_conf   = ml_conf * 0.85
+            final_conf   = ml_conf * 0.78
             alignment    = "smc_only"
         else:
-            # No SMC setup; rely entirely on ML
+            # No SMC setup at all; rely on ML only
             final_signal = ml_dir
             final_conf   = ml_conf
             alignment    = "ml_only"
+
+        # ── 60% confidence gate ─────────────────────────────────────────
+        # Only emit a directional call when confidence is high enough
+        if final_signal in ("BUY", "SELL") and final_conf < 60.0:
+            final_signal = "HOLD"
 
         return jsonify({
             "ok":         True,

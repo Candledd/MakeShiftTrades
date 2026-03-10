@@ -339,42 +339,42 @@ header {
 
     <div>
       <h3 style="margin-bottom:10px">Indicators</h3>
-      <button class="ind-btn on" id="ind-fvg"       onclick="toggleInd('fvg')">
+      <button class="ind-btn" id="ind-fvg"       onclick="toggleInd('fvg')">
         <span class="dot" style="background:#6495ed"></span>
         <span class="dot" style="background:#ffa500"></span>FVG
       </button>
-      <button class="ind-btn on" id="ind-ob"        onclick="toggleInd('ob')">
+      <button class="ind-btn" id="ind-ob"        onclick="toggleInd('ob')">
         <span class="dot" style="background:#089981"></span>
         <span class="dot" style="background:#f23645"></span>Order Blocks
       </button>
-      <button class="ind-btn on" id="ind-engulfing" onclick="toggleInd('engulfing')">
+      <button class="ind-btn" id="ind-engulfing" onclick="toggleInd('engulfing')">
         <span class="dot" style="background:#00bcd4"></span>
         <span class="dot" style="background:#e040fb"></span>Engulfing
       </button>
-      <button class="ind-btn on" id="ind-liquidity" onclick="toggleInd('liquidity')">
+      <button class="ind-btn" id="ind-liquidity" onclick="toggleInd('liquidity')">
         <span class="dot" style="background:#ffb300"></span>
         <span class="dot" style="background:#ab47bc"></span>Liquidity
       </button>
-      <button class="ind-btn on" id="ind-ms"        onclick="toggleInd('ms')">
+      <button class="ind-btn" id="ind-ms"        onclick="toggleInd('ms')">
         <span class="dot" style="background:#ffa726"></span>
         <span class="dot" style="background:#29b6f6"></span>Market Structure
       </button>
-      <button class="ind-btn on" id="ind-swings"    onclick="toggleInd('swings')">
+      <button class="ind-btn" id="ind-swings"    onclick="toggleInd('swings')">
         <span class="dot" style="background:#f23645"></span>
         <span class="dot" style="background:#089981"></span>Swing H/L
       </button>
-      <button class="ind-btn on" id="ind-key_levels" onclick="toggleInd('key_levels')">
+      <button class="ind-btn" id="ind-key_levels" onclick="toggleInd('key_levels')">
         <span class="dot" style="background:#f23645"></span>
         <span class="dot" style="background:#089981"></span>Key Levels
       </button>
-      <button class="ind-btn on" id="ind-vwap"       onclick="toggleInd('vwap')">
+      <button class="ind-btn" id="ind-vwap"       onclick="toggleInd('vwap')">
         <span class="dot" style="background:#ff6b6b"></span>VWAP
       </button>
-      <button class="ind-btn on" id="ind-sessions"   onclick="toggleInd('sessions')">
+      <button class="ind-btn" id="ind-sessions"   onclick="toggleInd('sessions')">
         <span class="dot" style="background:#3b82f6"></span>
         <span class="dot" style="background:#ffa500"></span>Sessions
       </button>
-      <button class="ind-btn on" id="ind-equilibrium" onclick="toggleInd('equilibrium')">
+      <button class="ind-btn" id="ind-equilibrium" onclick="toggleInd('equilibrium')">
         <span class="dot" style="background:#94a3b8"></span>Equilibrium
       </button>
     </div>
@@ -418,7 +418,7 @@ let cSeries       = null;   // candlestick
 let vSeries       = null;   // volume
 let vwapSeries    = null;   // VWAP line
 let indData       = {};     // latest indicator payload from /api/indicators
-let activeInds    = new Set(['fvg','ob','engulfing','liquidity','ms','swings','key_levels','vwap','sessions','equilibrium']);
+let activeInds    = new Set(); // all indicators off by default
 let arTimer       = null;
 let arCountdown   = 5;
 let arEnabled     = true;
@@ -887,13 +887,16 @@ async function loadSignal() {
 
     const sig  = d.signal;
     const conf = d.confidence;
+    const smc  = d.smc || {};
 
     // ── Badge ──────────────────────────────────────────────────
+    // WAIT = confidence below 60% but a nearby SMC setup exists
+    const isPending = smc.entry != null && sig === 'HOLD' && conf < 60.0;
     const cls = sig === 'BUY'  ? 'signal-buy'
               : sig === 'SELL' ? 'signal-sell'
               : 'signal-hold';
     badge.className   = 'signal-badge ' + cls;
-    badge.textContent = sig;
+    badge.textContent = isPending ? 'WAIT' : sig;
 
     // ── Confidence bar ────────────────────────────────────────────
     document.getElementById('sig-conf-val').textContent = conf.toFixed(1) + '%';
@@ -901,7 +904,18 @@ async function loadSignal() {
     fill.style.width      = Math.min(conf, 100) + '%';
     fill.style.background = sig === 'BUY'  ? 'var(--bull)'
                           : sig === 'SELL' ? 'var(--bear)'
-                          : 'var(--muted)';
+                          : conf >= 60     ? 'var(--muted)'
+                          : '#64748b';
+
+    // 60% threshold tick mark on the bar
+    const barWrap = fill.parentElement;
+    if (!barWrap.querySelector('.conf-threshold')) {
+      const mk = document.createElement('div');
+      mk.className = 'conf-threshold';
+      mk.style.cssText = 'position:absolute;left:60%;top:0;width:1px;height:100%;background:rgba(255,255,255,0.35);pointer-events:none;';
+      barWrap.style.position = 'relative';
+      barWrap.appendChild(mk);
+    }
 
     // ── Probabilities ────────────────────────────────────────────
     const p = d.ml.probabilities || {};
@@ -909,10 +923,12 @@ async function loadSignal() {
     document.getElementById('pb-hold').textContent = (p.HOLD ?? 0).toFixed(1) + '%';
     document.getElementById('pb-sell').textContent = (p.SELL ?? 0).toFixed(1) + '%';
 
-    // ── SMC levels ──────────────────────────────────────────────
-    const smc     = d.smc || {};
+    // ── SMC levels (always populated when an FVG setup exists) ───
     if (smc.entry != null) {
-      document.getElementById('lv-entry').textContent = '$' + smc.entry.toFixed(2);
+      const atZone = smc.price_at_zone;
+      // ~ prefix when price hasn't reached the zone yet (pending entry)
+      document.getElementById('lv-entry').textContent =
+        (atZone ? '' : '~') + '$' + smc.entry.toFixed(2);
       document.getElementById('lv-sl').textContent    = '$' + smc.stop_loss.toFixed(2);
       document.getElementById('lv-tp').textContent    = '$' + smc.take_profit.toFixed(2);
       document.getElementById('lv-rr').textContent    = smc.risk_reward.toFixed(2) + ':1';
@@ -923,21 +939,23 @@ async function loadSignal() {
       document.getElementById('lv-rr').textContent    = '—';
     }
 
-    // ── SMC score pips + alignment tag ─────────────────────────────
+    // ── SMC score pips (0–6) + alignment tag ──────────────────────
     const score    = smc.smc_score || 0;
-    const maxScore = 4;
+    const maxScore = 6;
     let pipHtml = '';
     for (let i = 0; i < maxScore; i++) {
       pipHtml += `<span class="smc-score-pip ${i < score ? 'pip-on' : 'pip-off'}"></span>`;
     }
 
     const alignCls = 'align-' + (d.alignment || 'ml_only');
-    const alignLbl = (d.alignment || 'ml_only').replace('_', ' ');
-    const trainTxt = d.ml.trained ? '' : ' · Training ML…';
+    const alignLbl = (d.alignment || 'ml_only').replace(/_/g, ' ');
+    const trainTxt = d.ml.trained ? '' : ' · Training ML…';
+    const zoneTxt  = smc.price_at_zone === false && smc.entry != null
+                     ? ' · ⚡ Pending' : '';
 
     status.innerHTML = `
       <span class="align-tag ${alignCls}">${alignLbl.toUpperCase()}</span>
-       SMC ${pipHtml}${trainTxt}`;
+       SMC ${pipHtml}${zoneTxt}${trainTxt}`;
 
     // ── Reason text ──────────────────────────────────────────────
     document.getElementById('sig-reason').textContent = smc.reason || '';
