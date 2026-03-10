@@ -59,6 +59,11 @@ MIN_RR_HARD: float = 1.5
 # Maximum entry-vs-current-price deviation (%) before rejecting the order.
 MAX_ENTRY_DEVIATION_PCT: float = 2.0
 
+# Minimum distance (in price units) that TP/SL must sit away from the Alpaca
+# market fill price (base_price).  Alpaca enforces >= 0.01; we use 0.02 to
+# give a small buffer against last-millisecond price drift.
+MIN_BRACKET_BUFFER: float = 0.02
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Double-Check Validator (standalone, used before every order dispatch)
@@ -303,33 +308,32 @@ class AlpacaTrader:
 
     # ── Position sizing ────────────────────────────────────────────────────────
 
-    def calc_qty(
+    def calc_notional(
         self,
         entry: float,
         stop_loss: float,
         confidence: float,
         available_capital: float,
-    ) -> int:
-        """Calculate share quantity from confidence and capital constraints.
+    ) -> float:
+        """Calculate the dollar notional to deploy based on confidence.
 
         Algorithm
         ---------
-        risk_amount   = available_capital × risk_fraction(confidence)
-        qty_by_risk   = floor(risk_amount / |entry − stop_loss|)
-        qty_by_capital= floor(available_capital / entry)
-        qty           = max(1, min(qty_by_risk, qty_by_capital))
+        risk_amount  = available_capital × risk_fraction(confidence)
+        risk_per_$   = |entry − stop_loss| / entry          (fraction of price at risk)
+        notional     = risk_amount / risk_per_$              ($ amount that risks exactly risk_amount)
+        notional     = min(notional, available_capital)      (never exceed available capital)
+        notional     = round to 2 dp, min $1.00
         """
         risk_per_share = abs(entry - stop_loss)
         if risk_per_share == 0 or entry <= 0:
-            return 0
+            return 0.0
 
-        risk_fraction  = _confidence_risk_fraction(confidence)
-        risk_amount    = available_capital * risk_fraction
-        qty_by_risk    = int(risk_amount / risk_per_share)
-        qty_by_capital = int(available_capital / entry)
-
-        qty = min(qty_by_risk, qty_by_capital)
-        return max(1, qty)
+        risk_fraction = _confidence_risk_fraction(confidence)
+        risk_amount   = available_capital * risk_fraction
+        notional      = (risk_amount / risk_per_share) * entry
+        notional      = min(notional, available_capital)
+        return max(1.0, round(notional, 2))
 
     # ── Place bracket order ────────────────────────────────────────────────────
 
@@ -379,77 +383,166 @@ class AlpacaTrader:
             logger.error("Account fetch failed before order placement: %s", exc)
             return {"ok": False, "error": f"Account fetch failed: {exc}"}
 
-        if available_bp < entry:
+        if available_bp < 1.0:
             msg = (
                 f"Insufficient capital: available ${available_bp:.2f} "
-                f"(hard limit ${cash_limit:.2f}), entry ${entry:.2f}."
+                f"(hard limit ${cash_limit:.2f})."
             )
             logger.error("[REJECTED] %s", msg)
             return {"ok": False, "error": msg}
 
-        # ── Step 3: Position sizing ────────────────────────────────────────────
-        qty = self.calc_qty(entry, stop_loss, confidence, available_bp)
-        if qty <= 0:
+        # ── Step 3: Position sizing (dollar notional) ──────────────────────────
+        notional = self.calc_notional(entry, stop_loss, confidence, available_bp)
+        if notional < 1.0:
             return {
                 "ok": False,
-                "error": "Position size resolved to 0 shares — stop distance too small.",
+                "error": "Position size resolved to $0 — stop distance too small or capital too low.",
             }
 
-        # ── Step 4: Submit bracket order ──────────────────────────────────────
-        try:
-            order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
-            order_req  = MarketOrderRequest(
+        # ── Step 3½: Clamp TP/SL to be valid relative to current_price ───────────
+        # Alpaca validates bracket legs against the actual fill price (base_price),
+        # NOT our signal entry.  If the market has moved even a cent, our TP can
+        # end up on the wrong side and the whole order is rejected.
+        # We snap each leg to be at least MIN_BRACKET_BUFFER away from
+        # current_price in the direction the strategy requires.
+        ref = current_price if current_price > 0 else entry
+        is_buy = side.upper() == "BUY"
+        if is_buy:
+            tp_min = round(ref + MIN_BRACKET_BUFFER, 2)
+            sl_max = round(ref - MIN_BRACKET_BUFFER, 2)
+            if take_profit < tp_min:
+                logger.warning(
+                    "[BRACKET CLAMP] BUY TP %.4f < ref+buf %.4f — clamping.",
+                    take_profit, tp_min,
+                )
+                take_profit = tp_min
+            if stop_loss > sl_max:
+                logger.warning(
+                    "[BRACKET CLAMP] BUY SL %.4f > ref-buf %.4f — clamping.",
+                    stop_loss, sl_max,
+                )
+                stop_loss = sl_max
+        else:  # SELL
+            tp_max = round(ref - MIN_BRACKET_BUFFER, 2)
+            sl_min = round(ref + MIN_BRACKET_BUFFER, 2)
+            if take_profit > tp_max:
+                logger.warning(
+                    "[BRACKET CLAMP] SELL TP %.4f > ref-buf %.4f — clamping.",
+                    take_profit, tp_max,
+                )
+                take_profit = tp_max
+            if stop_loss < sl_min:
+                logger.warning(
+                    "[BRACKET CLAMP] SELL SL %.4f < ref+buf %.4f — clamping.",
+                    stop_loss, sl_min,
+                )
+                stop_loss = sl_min
+
+        # ── Step 4: Submit bracket order (notional = $ amount) ────────────────
+        import json as _json
+        import re as _re
+
+        order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
+
+        def _build_req() -> MarketOrderRequest:
+            return MarketOrderRequest(
                 symbol=alpaca_ticker,
-                qty=qty,
+                notional=notional,
                 side=order_side,
                 time_in_force=TimeInForce.DAY,
                 order_class=OrderClass.BRACKET,
                 take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
                 stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
             )
-            order    = self._client.submit_order(order_req)
-            order_id = str(order.id)
 
-            # Persist active order mapping
-            self._state.setdefault("active_orders", {})[alpaca_ticker] = order_id
-            self._save_state()
+        try:
+            order = self._client.submit_order(_build_req())
+        except Exception as first_exc:
+            err_str = str(first_exc)
 
-            logger.info(
-                "[ORDER PLACED] %s %s x%d | %s→%s | Entry:%.4f SL:%.4f TP:%.4f | ID:%s",
-                side.upper(), alpaca_ticker, qty,
-                ticker, alpaca_ticker,
-                entry, stop_loss, take_profit, order_id,
-            )
-            return {
-                "ok":              True,
-                "order_id":        order_id,
-                "symbol":          alpaca_ticker,
-                "original_ticker": ticker,
-                "side":            side.upper(),
-                "qty":             qty,
-                "entry":           entry,
-                "stop_loss":       stop_loss,
-                "take_profit":     take_profit,
-                "confidence":      confidence,
-                "risk_fraction":   _confidence_risk_fraction(confidence),
-            }
+            # ── Alpaca bracket-leg rejection (error 42210000) ──────────────────
+            # Alpaca validates SL/TP against its own fill quote (base_price), which
+            # can differ from our yfinance reference by a few cents.  On this specific
+            # error we parse base_price from the payload, re-clamp both legs to be
+            # strictly valid, and retry exactly once.
+            if "42210000" in err_str or (
+                "base_price" in err_str and "stop_price" in err_str
+            ):
+                bp: Optional[float] = None
+                try:
+                    # SDK usually stringifies the raw JSON error body.
+                    err_json = _json.loads(err_str)
+                    bp = float(err_json["base_price"])
+                except (ValueError, KeyError, TypeError):
+                    m = _re.search(r'"base_price"\s*:\s*"?([\d.]+)"?', err_str)
+                    if m:
+                        bp = float(m.group(1))
 
-        except Exception as exc:
-            err_str = str(exc)
+                if bp is not None and bp > 0:
+                    logger.warning(
+                        "[BRACKET RETRY] Alpaca base_price=%.4f differs from "
+                        "ref=%.4f — re-clamping SL/TP to base_price and retrying.",
+                        bp, ref,
+                    )
+                    if is_buy:
+                        stop_loss   = round(bp - MIN_BRACKET_BUFFER, 2)
+                        take_profit = max(take_profit, round(bp + MIN_BRACKET_BUFFER, 2))
+                    else:
+                        stop_loss   = round(bp + MIN_BRACKET_BUFFER, 2)
+                        take_profit = min(take_profit, round(bp - MIN_BRACKET_BUFFER, 2))
+                    try:
+                        order = self._client.submit_order(_build_req())
+                    except Exception as retry_exc:
+                        err_str = str(retry_exc)
+                        logger.error(
+                            "[ORDER ERROR after retry] %s (%s): %s",
+                            ticker, alpaca_ticker, err_str,
+                        )
+                        return {"ok": False, "error": f"Order submission error: {err_str}"}
+                else:
+                    logger.error("[ORDER ERROR] %s (%s): %s", ticker, alpaca_ticker, err_str)
+                    return {"ok": False, "error": f"Order submission error: {err_str}"}
 
             # Rate-limit: 429
-            if "429" in err_str or "rate limit" in err_str.lower():
+            elif "429" in err_str or "rate limit" in err_str.lower():
                 logger.warning("[RATE LIMITED] Alpaca API — will retry in 2 s. %s", err_str)
                 time.sleep(2)
                 return {"ok": False, "error": f"Rate limited by Alpaca API: {err_str}"}
 
             # Insufficient buying power
-            if "insufficient" in err_str.lower() or "buying power" in err_str.lower():
+            elif "insufficient" in err_str.lower() or "buying power" in err_str.lower():
                 logger.error("[BUYING POWER] %s → %s", ticker, err_str)
                 return {"ok": False, "error": f"Insufficient buying power: {err_str}"}
 
-            logger.error("[ORDER ERROR] %s (%s): %s", ticker, alpaca_ticker, err_str)
-            return {"ok": False, "error": f"Order submission error: {err_str}"}
+            else:
+                logger.error("[ORDER ERROR] %s (%s): %s", ticker, alpaca_ticker, err_str)
+                return {"ok": False, "error": f"Order submission error: {err_str}"}
+
+        order_id = str(order.id)
+
+        # Persist active order mapping
+        self._state.setdefault("active_orders", {})[alpaca_ticker] = order_id
+        self._save_state()
+
+        logger.info(
+            "[ORDER PLACED] %s %s $%.2f notional | %s→%s | Entry:%.4f SL:%.4f TP:%.4f | ID:%s",
+            side.upper(), alpaca_ticker, notional,
+            ticker, alpaca_ticker,
+            entry, stop_loss, take_profit, order_id,
+        )
+        return {
+            "ok":              True,
+            "order_id":        order_id,
+            "symbol":          alpaca_ticker,
+            "original_ticker": ticker,
+            "side":            side.upper(),
+            "notional":        notional,
+            "entry":           entry,
+            "stop_loss":       stop_loss,
+            "take_profit":     take_profit,
+            "confidence":      confidence,
+            "risk_fraction":   _confidence_risk_fraction(confidence),
+        }
 
     # ── Profit callback (call after a position closes to grow cap) ─────────────
 
