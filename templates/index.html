@@ -534,7 +534,7 @@ let _mtfLoadSeq = 0;
 const UI_STATE_KEY = 'makeshifttrades.chartState';
 
 const PERIOD = {
-  '1m':'1d', '3m':'5d', '5m':'5d', '15m':'1mo',
+  '1m':'5d', '3m':'5d', '5m':'5d', '15m':'1mo',
 };
 
 function getStoredState() {
@@ -572,17 +572,18 @@ function clearPersistedView() {
 
 function persistViewState(candleCount = _candleCount) {
   if (!chart || !activeTicker || !activeItvl || candleCount <= 0) return;
-  const timeRange = chart.timeScale().getVisibleRange();
-  if (!timeRange) return;
+  const logicalRange = chart.timeScale().getVisibleLogicalRange();
+  if (!logicalRange) return;
 
   persistUIState({
     view: {
-      ticker: activeTicker,
-      interval: activeItvl,
+      ticker:    activeTicker,
+      interval:  activeItvl,
+      period:    PERIOD[activeItvl] || '5d',
       candleCount,
-      timeRange: {
-        from: timeRange.from,
-        to: timeRange.to,
+      logicalRange: {
+        from: logicalRange.from,
+        to:   logicalRange.to,
       },
     },
   });
@@ -598,7 +599,12 @@ function getRestorableViewState(ticker = activeTicker, interval = activeItvl) {
   const view = state.view;
   if (!view) return null;
   if (view.ticker !== ticker || view.interval !== interval) return null;
-  if (!view.timeRange || typeof view.timeRange.from !== 'number' || typeof view.timeRange.to !== 'number') {
+  // Reject stale views saved under a different data period (e.g. 1d → 5d change).
+  const currentPeriod = PERIOD[interval] || '5d';
+  if (view.period && view.period !== currentPeriod) return null;
+  if (!view.logicalRange ||
+      typeof view.logicalRange.from !== 'number' ||
+      typeof view.logicalRange.to   !== 'number') {
     return null;
   }
   return view;
@@ -915,14 +921,13 @@ async function loadChart(preserveView = false) {
     document.getElementById('chart-title').textContent = requestedTicker + ' — loading…';
   }
 
-  // Capture the visible TIME RANGE before any setData() calls.
-  // Using getVisibleRange() (UTC time values) instead of getVisibleLogicalRange()
-  // (bar indices) means we never need to calculate a "shift" — time values are
-  // absolute and survive candle count changes between fetches.
-  let savedTimeRange = null;
+  // Capture the visible LOGICAL RANGE (bar indices) before any setData() calls.
+  // Logical indices are stable — after adding new bars at the end, we shift by
+  // candleDelta so the viewport still points at the same candles.
+  let savedLogicalRange = null;
   const prevCandleCount = _candleCount;
   if (preserveView && chart && prevCandleCount > 0) {
-    savedTimeRange = chart.timeScale().getVisibleRange();
+    savedLogicalRange = chart.timeScale().getVisibleLogicalRange();
   }
 
   try {
@@ -934,12 +939,15 @@ async function loadChart(preserveView = false) {
     const candles = cd.candles;
     if (!candles || !candles.length) { showErr('No data for this ticker / interval.'); return; }
 
-    // restoreRange() re-pins the viewport using the saved UTC time range after
-    // every setData() call. Because time values are absolute, no shift math is
-    // needed even when the candle count changes between refreshes.
+    // Shift the logical range by the number of new bars appended so the
+    // viewport keeps pointing at the same candles after every refresh.
+    const candleDelta = candles.length - prevCandleCount;
     const restoreRange = () => {
-      if (preserveView && savedTimeRange) {
-        chart.timeScale().setVisibleRange(savedTimeRange);
+      if (preserveView && savedLogicalRange !== null) {
+        chart.timeScale().setVisibleLogicalRange({
+          from: savedLogicalRange.from + candleDelta,
+          to:   savedLogicalRange.to   + candleDelta,
+        });
       }
     };
 
@@ -985,44 +993,35 @@ async function loadChart(preserveView = false) {
     }
 
     // ── Restore / initialise viewport ─────────────────────────────────────
-    // Apply synchronously first (minimises visible flash), then re-apply via
-    // a double-RAF to override LightweightCharts' internal fitContent() which
-    // is queued in frame N+1 after every setData() call.
     const restoredView = getRestorableViewState(requestedTicker, requestedItvl);
+    const savedCount   = restoredView ? (restoredView.candleCount || candles.length) : candles.length;
+    const viewDelta    = candles.length - savedCount;
 
-    if (preserveView && savedTimeRange) {
-      chart.timeScale().setVisibleRange(savedTimeRange);
+    let _targetFrom, _targetTo;
+    if (preserveView && savedLogicalRange !== null) {
+      _targetFrom = savedLogicalRange.from + candleDelta;
+      _targetTo   = savedLogicalRange.to   + candleDelta;
     } else if (restoredView) {
-      chart.timeScale().setVisibleRange(restoredView.timeRange);
+      _targetFrom = restoredView.logicalRange.from + viewDelta;
+      _targetTo   = restoredView.logicalRange.to   + viewDelta;
     } else {
-      // First load: show the most recent 150 candles at a readable zoom.
-      chart.timeScale().setVisibleLogicalRange({
-        from: Math.max(0, candles.length - 150),
-        to:   candles.length,
-      });
+      _targetFrom = Math.max(0, candles.length - 150);
+      _targetTo   = candles.length;
     }
+    chart.timeScale().setVisibleLogicalRange({ from: _targetFrom, to: _targetTo });
 
     persistViewState(candles.length);
     persistUIState();
 
     loadSignal();         // refresh AI + MTF panels (MTF fired inside loadSignal)
 
-    // Double-RAF: override the internal fitContent() that LightweightCharts
-    // queues in frame N+1 after setData(). Frame N+2 is guaranteed to run after.
-    const _deferTR = preserveView && savedTimeRange ? savedTimeRange
-                   : restoredView                   ? restoredView.timeRange
-                   : null;
-    requestAnimationFrame(() => requestAnimationFrame(() => {
+    // One RAF is enough: setVisibleLogicalRange() sets a user-controlled viewport
+    // flag that LightweightCharts respects on re-render, so we only need one
+    // deferred frame to handle the RAF LWC schedules after the final setData().
+    requestAnimationFrame(() => {
       if (requestId !== _chartLoadSeq || !chart) return;
-      if (_deferTR) {
-        chart.timeScale().setVisibleRange(_deferTR);
-      } else {
-        chart.timeScale().setVisibleLogicalRange({
-          from: Math.max(0, _candleCount - 150),
-          to:   _candleCount,
-        });
-      }
-    }));
+      chart.timeScale().setVisibleLogicalRange({ from: _targetFrom, to: _targetTo });
+    });
 
   } catch (err) {
     if (requestId !== _chartLoadSeq) return;
