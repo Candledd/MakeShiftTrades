@@ -397,6 +397,204 @@ def api_mtf_signal():
         return jsonify({"ok": False, "error": f"Server error: {exc}"}), 500
 
 
+# ── Alpaca Paper Trading API ──────────────────────────────────────────────────
+#
+# Lazy-initialised singleton so the server starts even if ALPACA_* env vars
+# are absent (the routes return a clear error in that case).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_alpaca_trader = None
+_alpaca_init_error: str = ""
+
+
+def _get_alpaca():
+    """Return the AlpacaTrader singleton, initialising on first call."""
+    global _alpaca_trader, _alpaca_init_error
+    if _alpaca_trader is not None:
+        return _alpaca_trader
+    try:
+        from src.alpaca_trader import AlpacaTrader
+        _alpaca_trader = AlpacaTrader()
+        _alpaca_init_error = ""
+    except Exception as exc:
+        _alpaca_init_error = str(exc)
+        logging.getLogger(__name__).error("AlpacaTrader init failed: %s", exc)
+        _alpaca_trader = None
+    return _alpaca_trader
+
+
+@app.route("/api/paper/account")
+def api_paper_account():
+    """Return Alpaca paper account info + our enforced cash limit."""
+    trader = _get_alpaca()
+    if trader is None:
+        return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
+    return jsonify(trader.get_account())
+
+
+@app.route("/api/paper/orders")
+def api_paper_orders():
+    """Return all currently open / pending bracket orders."""
+    trader = _get_alpaca()
+    if trader is None:
+        return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
+    return jsonify(trader.get_active_orders())
+
+
+@app.route("/api/paper/cancel/<order_id>", methods=["DELETE"])
+def api_paper_cancel(order_id: str):
+    """Cancel an open order by its Alpaca UUID."""
+    trader = _get_alpaca()
+    if trader is None:
+        return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
+    return jsonify(trader.cancel_order(order_id))
+
+
+@app.route("/api/paper/toggle", methods=["POST"])
+def api_paper_toggle():
+    """Enable or disable paper trading for a dashboard ticker.
+
+    Body JSON: { "ticker": "NQ=F", "enabled": true }
+    Response:  { "ok": true, "ticker": "NQ=F", "enabled": true }
+    """
+    trader = _get_alpaca()
+    if trader is None:
+        return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    ticker  = str(data.get("ticker", "")).strip().upper()
+    enabled = bool(data.get("enabled", False))
+    if not ticker:
+        return jsonify({"ok": False, "error": "Missing 'ticker' field."}), 400
+    trader.set_enabled(ticker, enabled)
+    return jsonify({"ok": True, "ticker": ticker, "enabled": enabled})
+
+
+@app.route("/api/paper/status")
+def api_paper_status():
+    """Return the enabled/disabled state for every ticker plus connection health.
+
+    Query param:  ticker  (optional, single ticker check)
+    Response: {
+      "ok": true,
+      "connected": true,
+      "enabled": { "NQ=F": true, "SPY": false, ... },
+      "ticker_enabled": true    # present only if ?ticker= was provided
+    }
+    """
+    trader = _get_alpaca()
+    if trader is None:
+        return jsonify({
+            "ok": False,
+            "connected": False,
+            "error": _alpaca_init_error or "AlpacaTrader unavailable",
+            "enabled": {},
+        })
+
+    # Test connectivity with a lightweight account call
+    acct = trader.get_account()
+    connected = acct.get("ok", False)
+
+    result: dict = {
+        "ok":        True,
+        "connected": connected,
+        "enabled":   trader.get_all_enabled(),
+    }
+
+    ticker = request.args.get("ticker", "").strip().upper()
+    if ticker:
+        result["ticker_enabled"] = trader.is_enabled(ticker)
+
+    return jsonify(result)
+
+
+@app.route("/api/paper/execute", methods=["POST"])
+def api_paper_execute():
+    """Execute a paper bracket order for a given ticker.
+
+    Body JSON (all required):
+    {
+      "ticker":      "NQ=F",
+      "side":        "BUY",          // "BUY" or "SELL"
+      "entry":       19500.25,
+      "stop_loss":   19480.00,
+      "take_profit": 19550.00,
+      "confidence":  78.5            // 0–100 from the signal API
+    }
+
+    The endpoint:
+    1. Checks that paper trading is enabled for the ticker.
+    2. Fetches current price (latest close from yfinance).
+    3. Runs the double-check validator.
+    4. Sizes the position by confidence × available capital (≤ $5 k hard limit).
+    5. Submits the bracket order to Alpaca Paper API.
+
+    All failures are logged and returned to the caller with "ok": false.
+    """
+    trader = _get_alpaca()
+    if trader is None:
+        return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
+
+    data = request.get_json(silent=True) or {}
+
+    ticker     = str(data.get("ticker",     "")).strip().upper()
+    side       = str(data.get("side",       "")).strip().upper()
+    confidence = float(data.get("confidence", 0))
+
+    # Parse numeric order levels
+    try:
+        entry       = float(data["entry"])
+        stop_loss   = float(data["stop_loss"])
+        take_profit = float(data["take_profit"])
+    except (KeyError, TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": f"Missing/invalid numeric field: {exc}"}), 400
+
+    if not ticker or not side:
+        return jsonify({"ok": False, "error": "Fields 'ticker' and 'side' are required."}), 400
+
+    # Guard: paper trading must be explicitly enabled for this ticker
+    if not trader.is_enabled(ticker):
+        return jsonify({
+            "ok":    False,
+            "error": f"Paper trading is not enabled for {ticker}. "
+                     "Toggle it ON in the dashboard first.",
+        }), 409
+
+    # Guard: minimum confidence threshold (60 %)
+    import config as _cfg
+    min_conf = getattr(_cfg, "PAPER_MIN_CONFIDENCE", 60.0)
+    if confidence < min_conf:
+        return jsonify({
+            "ok":    False,
+            "error": f"Signal confidence {confidence:.1f}% is below the minimum "
+                     f"{min_conf:.1f}% required for execution.",
+        }), 422
+
+    # Fetch latest price for stale-entry guard inside validate_order
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(period="1d", interval="1m")
+        current_price = float(hist["Close"].iloc[-1]) if not hist.empty else entry
+    except Exception as price_exc:
+        logging.getLogger(__name__).warning(
+            "Could not fetch current price for %s (using entry as fallback): %s",
+            ticker, price_exc,
+        )
+        current_price = entry  # stale-entry guard will still run using entry ≈ entry
+
+    result = trader.place_bracket_order(
+        ticker=ticker,
+        side=side,
+        entry=entry,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        confidence=confidence,
+        current_price=current_price,
+    )
+
+    http_code = 200 if result.get("ok") else 422
+    return jsonify(result), http_code
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

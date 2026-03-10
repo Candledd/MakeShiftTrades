@@ -12,3 +12,6 @@ flask>=3.0.0
 scikit-learn>=1.3.0
 numpy>=1.24.0
 
+# Alpaca Paper Trading API
+alpaca-py>=0.20.0
+

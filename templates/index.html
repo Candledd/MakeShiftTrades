@@ -293,6 +293,87 @@ header {
   font-size: 10px; color: var(--muted); margin-top: 5px;
   font-style: italic;
 }
+
+/* ── Paper Trading Toggle ──────────────────────────────────────────── */
+#paper-trade-section {
+  border-top: 1px solid var(--border);
+  margin-top: 10px; padding-top: 10px;
+}
+#paper-trade-section h3 {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--muted); margin-bottom: 8px;
+}
+.pt-toggle-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+}
+.pt-toggle-switch {
+  position: relative; display: inline-block; width: 42px; height: 22px; flex-shrink: 0;
+}
+.pt-toggle-switch input { opacity: 0; width: 0; height: 0; }
+.pt-toggle-slider {
+  position: absolute; cursor: pointer; inset: 0;
+  background: var(--border); border-radius: 22px;
+  transition: background .25s;
+}
+.pt-toggle-slider::before {
+  content: ''; position: absolute;
+  width: 16px; height: 16px; left: 3px; bottom: 3px;
+  background: #fff; border-radius: 50%; transition: transform .25s;
+}
+.pt-toggle-switch input:checked + .pt-toggle-slider { background: var(--bull); }
+.pt-toggle-switch input:checked + .pt-toggle-slider::before { transform: translateX(20px); }
+.pt-status-lbl {
+  font-size: 12px; font-weight: 700; letter-spacing: .3px;
+  transition: color .25s;
+}
+.pt-status-on  { color: var(--bull); }
+.pt-status-off { color: var(--muted); }
+
+.pt-conn-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  margin-left: auto; transition: background .3s;
+}
+.pt-conn-ok  { background: var(--bull); box-shadow: 0 0 5px var(--bull); }
+.pt-conn-err { background: var(--bear); }
+.pt-conn-wait{ background: var(--muted); }
+
+.pt-execute-btn {
+  width: 100%; padding: 8px 0; border-radius: 8px; border: none;
+  font-size: 13px; font-weight: 700; cursor: pointer;
+  transition: all .2s; margin-bottom: 6px;
+}
+.pt-execute-btn.buy  { background: rgba(8,153,129,.85); color: #fff; }
+.pt-execute-btn.sell { background: rgba(242,54,69,.85);  color: #fff; }
+.pt-execute-btn:disabled {
+  background: var(--surface2); color: var(--muted); cursor: not-allowed;
+}
+.pt-execute-btn:not(:disabled):hover { filter: brightness(1.12); }
+
+.pt-order-row {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; padding: 5px 7px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface2); margin-bottom: 4px;
+}
+.pt-order-side-buy  { color: var(--bull); font-weight: 700; }
+.pt-order-side-sell { color: var(--bear); font-weight: 700; }
+.pt-cancel-btn {
+  margin-left: auto; background: transparent; border: none;
+  color: var(--muted); cursor: pointer; font-size: 12px; padding: 2px 4px;
+}
+.pt-cancel-btn:hover { color: var(--bear); }
+.pt-msg {
+  font-size: 10px; color: var(--muted); line-height: 1.5;
+  margin-top: 4px; min-height: 13px;
+  word-break: break-word;
+}
+.pt-msg.err { color: var(--bear); }
+.pt-msg.ok  { color: var(--bull); }
+.pt-acct-row {
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--muted); margin-bottom: 3px;
+}
+.pt-acct-val { color: var(--text); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -429,6 +510,53 @@ header {
           </div>
         </div>
         <div id="mtf-src" class="mtf-src"></div>
+      </div>
+
+      <!-- ── Paper Trading Section ── -->
+      <div id="paper-trade-section">
+        <h3>Paper Trading</h3>
+
+        <!-- Toggle row -->
+        <div class="pt-toggle-row">
+          <label class="pt-toggle-switch" title="Toggle paper trading for this ticker">
+            <input type="checkbox" id="pt-toggle" onchange="onPaperToggle(this.checked)">
+            <span class="pt-toggle-slider"></span>
+          </label>
+          <span id="pt-status-lbl" class="pt-status-lbl pt-status-off">OFF</span>
+          <span id="pt-conn-dot" class="pt-conn-dot pt-conn-wait" title="API connection"></span>
+        </div>
+
+        <!-- Account summary (visible once connected) -->
+        <div id="pt-acct-info" style="display:none;margin-bottom:7px">
+          <div class="pt-acct-row">
+            <span>Cap Limit</span>
+            <span id="pt-cash-limit" class="pt-acct-val">—</span>
+          </div>
+          <div class="pt-acct-row">
+            <span>Buying Power</span>
+            <span id="pt-buying-power" class="pt-acct-val">—</span>
+          </div>
+          <div class="pt-acct-row">
+            <span>P&amp;L</span>
+            <span id="pt-pnl" class="pt-acct-val">—</span>
+          </div>
+        </div>
+
+        <!-- Execute button (shown when toggle is ON and a valid signal exists) -->
+        <button id="pt-execute-btn" class="pt-execute-btn" disabled
+                onclick="executePaperTrade()">
+          Enable trading to execute
+        </button>
+
+        <!-- Feedback message -->
+        <div id="pt-msg" class="pt-msg"></div>
+
+        <!-- Active orders list -->
+        <div id="pt-orders-wrap" style="display:none;margin-top:6px">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;
+                      letter-spacing:.8px;margin-bottom:4px">Active Orders</div>
+          <div id="pt-orders-list"></div>
+        </div>
       </div>
     </div>
 
@@ -1058,6 +1186,11 @@ function selectTicker(t) {
   clearPersistedView();
   indData = {}; if (cSeries) cSeries.setMarkers([]);
   if (vwapSeries) vwapSeries.setData([]);
+  // Reset paper trading panel for new ticker
+  _lastSignal = null;
+  setPtMsg('');
+  refreshExecuteButton();
+  refreshPaperStatus();
   loadChart(false); startAR();
 }
 
@@ -1335,6 +1468,9 @@ async function loadSignal() {
     // ── Reason text ──────────────────────────────────────────────
     document.getElementById('sig-reason').textContent = smc.reason || '';
 
+    // Cache for paper trading execute button
+    _cacheSignal(d);
+
     // Kick off MTF fetch — updates the inline MTF section below
     loadMTFSignal();
 
@@ -1359,12 +1495,285 @@ window.addEventListener('DOMContentLoaded', () => {
     loadChart(false);
     startAR();
   }
+  // Init paper trading panel
+  refreshPaperStatus();
 });
 
 window.addEventListener('beforeunload', () => {
   persistViewState();
   persistUIState();
 });
+
+/* ── Paper Trading ──────────────────────────────────────────────────────── */
+
+// Latest signal cache — populated by loadSignal(), consumed by executePaperTrade()
+let _lastSignal = null;
+
+// Track the paper-status polling timer
+let _ptStatusTimer = null;
+
+function setPtMsg(text, type = '') {
+  const el = document.getElementById('pt-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.className   = 'pt-msg' + (type ? ' ' + type : '');
+}
+
+function setConnDot(state) {
+  // state: 'ok' | 'err' | 'wait'
+  const dot = document.getElementById('pt-conn-dot');
+  if (!dot) return;
+  dot.className = 'pt-conn-dot pt-conn-' + state;
+  dot.title = state === 'ok'   ? 'API connected'
+            : state === 'err'  ? 'API error / disconnected'
+            : 'Checking…';
+}
+
+async function refreshPaperStatus() {
+  try {
+    const ticker = activeTicker || '';
+    const r      = await fetch(`/api/paper/status${ticker ? '?ticker=' + encodeURIComponent(ticker) : ''}`);
+    const d      = await r.json();
+
+    setConnDot(d.connected ? 'ok' : 'err');
+
+    // Sync toggle for the current ticker
+    const toggle = document.getElementById('pt-toggle');
+    if (toggle && ticker) {
+      const isOn = !!(d.enabled || {})[ticker];
+      toggle.checked = isOn;
+      syncToggleUI(isOn);
+    }
+
+    // Update account info
+    if (d.connected) {
+      const ar = await fetch('/api/paper/account');
+      const ad = await ar.json();
+      if (ad.ok) {
+        document.getElementById('pt-cash-limit').textContent    =
+          '$' + (ad.cash_limit || 0).toLocaleString('en-US', {maximumFractionDigits: 2});
+        document.getElementById('pt-buying-power').textContent  =
+          '$' + (ad.buying_power || 0).toLocaleString('en-US', {maximumFractionDigits: 2});
+        const pnl = ad.total_pnl || 0;
+        const pnlEl = document.getElementById('pt-pnl');
+        pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+        pnlEl.style.color = pnl >= 0 ? 'var(--bull)' : 'var(--bear)';
+        document.getElementById('pt-acct-info').style.display = 'block';
+      }
+      // Refresh orders list
+      refreshOrdersList();
+    }
+  } catch (err) {
+    setConnDot('err');
+    console.warn('refreshPaperStatus error:', err);
+  }
+}
+
+async function refreshOrdersList() {
+  try {
+    const r = await fetch('/api/paper/orders');
+    const d = await r.json();
+    if (!d.ok) return;
+    const list = document.getElementById('pt-orders-list');
+    const wrap = document.getElementById('pt-orders-wrap');
+    if (!list || !wrap) return;
+
+    list.innerHTML = '';
+    if (!d.orders || d.orders.length === 0) {
+      wrap.style.display = 'none';
+      return;
+    }
+    wrap.style.display = 'block';
+    for (const o of d.orders) {
+      const sideClass = o.side && o.side.toLowerCase().includes('buy')
+                        ? 'pt-order-side-buy' : 'pt-order-side-sell';
+      const row = document.createElement('div');
+      row.className = 'pt-order-row';
+
+      // Build DOM nodes (no innerHTML) to avoid XSS from API response data
+      const sideSpan   = document.createElement('span');
+      sideSpan.className = sideClass;
+      sideSpan.textContent = (o.side || '').toUpperCase();
+
+      const symSpan    = document.createElement('span');
+      symSpan.textContent = o.symbol || '';
+
+      const qtySpan    = document.createElement('span');
+      qtySpan.style.color = 'var(--muted)';
+      qtySpan.textContent = '×' + (o.qty || '');
+
+      const stSpan     = document.createElement('span');
+      stSpan.style.cssText = 'font-size:10px;color:var(--muted)';
+      stSpan.textContent   = o.status || '';
+
+      const cancelBtn  = document.createElement('button');
+      cancelBtn.className   = 'pt-cancel-btn';
+      cancelBtn.title       = 'Cancel order';
+      cancelBtn.textContent = '✕';
+      cancelBtn.addEventListener('click', () => cancelPaperOrder(o.id));
+
+      row.appendChild(sideSpan);
+      row.appendChild(symSpan);
+      row.appendChild(qtySpan);
+      row.appendChild(stSpan);
+      row.appendChild(cancelBtn);
+      list.appendChild(row);
+    }
+  } catch (err) {
+    console.warn('refreshOrdersList error:', err);
+  }
+}
+
+async function cancelPaperOrder(orderId) {
+  setPtMsg('Cancelling…');
+  try {
+    const r = await fetch(`/api/paper/cancel/${encodeURIComponent(orderId)}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.ok) {
+      setPtMsg('Order cancelled.', 'ok');
+      refreshOrdersList();
+    } else {
+      setPtMsg('Cancel failed: ' + (d.error || 'unknown'), 'err');
+    }
+  } catch (err) {
+    setPtMsg('Network error during cancel.', 'err');
+    console.error('cancelPaperOrder error:', err);
+  }
+}
+
+function syncToggleUI(isOn) {
+  const lbl = document.getElementById('pt-status-lbl');
+  if (lbl) {
+    lbl.textContent = isOn ? 'ON — Active' : 'OFF';
+    lbl.className   = 'pt-status-lbl ' + (isOn ? 'pt-status-on' : 'pt-status-off');
+  }
+  refreshExecuteButton();
+}
+
+async function onPaperToggle(enabled) {
+  syncToggleUI(enabled);
+  if (!activeTicker) return;
+  setPtMsg(enabled ? 'Enabling paper trading…' : 'Disabling paper trading…');
+  try {
+    const r = await fetch('/api/paper/toggle', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ ticker: activeTicker, enabled }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      setPtMsg(enabled
+        ? `Paper trading ENABLED for ${activeTicker}.`
+        : `Paper trading DISABLED for ${activeTicker}.`,
+        enabled ? 'ok' : '');
+      refreshPaperStatus();
+    } else {
+      setPtMsg('Toggle failed: ' + (d.error || 'unknown'), 'err');
+      // Revert checkbox
+      const toggle = document.getElementById('pt-toggle');
+      if (toggle) toggle.checked = !enabled;
+      syncToggleUI(!enabled);
+    }
+  } catch (err) {
+    setPtMsg('Network error.', 'err');
+    const toggle = document.getElementById('pt-toggle');
+    if (toggle) toggle.checked = !enabled;
+    syncToggleUI(!enabled);
+    console.error('onPaperToggle error:', err);
+  }
+}
+
+function refreshExecuteButton() {
+  const btn      = document.getElementById('pt-execute-btn');
+  const toggle   = document.getElementById('pt-toggle');
+  if (!btn) return;
+
+  const isOn = toggle && toggle.checked;
+  const sig  = _lastSignal;
+  const hasActionable = sig && sig.smc && sig.smc.entry != null
+                        && (sig.signal === 'BUY' || sig.signal === 'SELL');
+
+  if (!isOn) {
+    btn.disabled     = true;
+    btn.textContent  = 'Toggle ON to trade';
+    btn.className    = 'pt-execute-btn';
+    return;
+  }
+
+  if (!hasActionable) {
+    btn.disabled    = true;
+    btn.textContent = 'No signal — watching…';
+    btn.className   = 'pt-execute-btn';
+    return;
+  }
+
+  // Actionable
+  btn.disabled    = false;
+  btn.textContent = `▶ Execute ${sig.signal}  ${activeTicker}`;
+  btn.className   = 'pt-execute-btn ' + (sig.signal === 'BUY' ? 'buy' : 'sell');
+}
+
+async function executePaperTrade() {
+  const sig = _lastSignal;
+  if (!sig || !sig.smc || sig.smc.entry == null) {
+    setPtMsg('No valid signal to execute.', 'err');
+    return;
+  }
+
+  const payload = {
+    ticker:      activeTicker,
+    side:        sig.signal,           // "BUY" or "SELL"
+    entry:       sig.smc.entry,
+    stop_loss:   sig.smc.stop_loss,
+    take_profit: sig.smc.take_profit,
+    confidence:  sig.confidence,
+  };
+
+  setPtMsg('Submitting bracket order…');
+  document.getElementById('pt-execute-btn').disabled = true;
+
+  try {
+    const r = await fetch('/api/paper/execute', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload),
+    });
+    const d = await r.json();
+
+    if (d.ok) {
+      setPtMsg(
+        `✓ Order placed! ${d.side} ${d.qty}× ${d.symbol} | ID: ${d.order_id.slice(0, 8)}…`,
+        'ok'
+      );
+      refreshOrdersList();
+      refreshPaperStatus();
+    } else {
+      setPtMsg('✗ ' + (d.error || 'Order failed'), 'err');
+      console.error('executePaperTrade error:', d.error);
+    }
+  } catch (err) {
+    setPtMsg('Network error — order not sent.', 'err');
+    console.error('executePaperTrade network error:', err);
+  } finally {
+    refreshExecuteButton();
+  }
+}
+
+// Hook into loadSignal so the execute button always reflects the latest signal
+const _origLoadSignal = loadSignal;
+loadSignal = async function() {
+  await _origLoadSignal.apply(this, arguments);
+};
+
+// Patch the existing loadSignal to cache the result (we wrap the fetch section)
+// The cache is set via a small helper called from inside loadSignal.
+function _cacheSignal(data) {
+  _lastSignal = data;
+  refreshExecuteButton();
+}
+
+// Poll paper status every 15 s while the page is open
+setInterval(refreshPaperStatus, 15_000);
 </script>
 </body>
 </html>

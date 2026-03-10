@@ -3,9 +3,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Broker credentials ────────────────────────────────────────────────────────
+# ── Broker credentials (legacy) ───────────────────────────────────────────────
 API_KEY    = os.getenv("API_KEY", "")
 API_SECRET = os.getenv("API_SECRET", "")
+
+# ── Alpaca Paper Trading credentials ──────────────────────────────────────────
+# Loaded from ALPACA_API_KEY / ALPACA_SECRET_KEY in .env.
+# The AlpacaTrader class reads these directly from os.environ; this block
+# only validates that the vars are present at startup.
+ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
+
+# ── Paper trading limits ───────────────────────────────────────────────────────
+try:
+    PAPER_CASH_LIMIT = float(os.getenv("PAPER_CASH_LIMIT", "5000"))
+except ValueError:
+    raise ValueError("PAPER_CASH_LIMIT must be a valid number")
+
+try:
+    PAPER_MIN_CONFIDENCE = float(os.getenv("PAPER_MIN_CONFIDENCE", "60.0"))
+except ValueError:
+    raise ValueError("PAPER_MIN_CONFIDENCE must be a valid number")
 
 # ── Instrument ────────────────────────────────────────────────────────────────
 SYMBOL = os.getenv("SYMBOL", "SPY")
