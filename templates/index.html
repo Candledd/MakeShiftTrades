@@ -205,11 +205,9 @@ header {
 .proba-sell { color: var(--bear); }
 .proba-hold { color: var(--muted); }
 .sig-levels {
-  display: none;
-  border-top: 1px solid var(--border); padding-top: 9px;
   display: grid; grid-template-columns: 1fr 1fr; gap: 5px 6px;
+  border-top: 1px solid var(--border); padding-top: 9px;
 }
-.sig-levels.hidden { display: none; }
 .level-row  { display: flex; flex-direction: column; }
 .level-lbl  { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
 .level-val  { font-size: 12px; font-weight: 700; color: var(--text); margin-top: 1px; }
@@ -316,7 +314,7 @@ header {
         </div>
       </div>
 
-      <div id="sig-levels" class="sig-levels hidden">
+      <div id="sig-levels" class="sig-levels">
         <div class="level-row">
           <span class="level-lbl">Entry</span>
           <span id="lv-entry" class="level-val">—</span>
@@ -777,15 +775,16 @@ async function loadSignal() {
 
     // ── SMC levels ──────────────────────────────────────────────
     const smc     = d.smc || {};
-    const lvBlock = document.getElementById('sig-levels');
     if (smc.entry != null) {
       document.getElementById('lv-entry').textContent = '$' + smc.entry.toFixed(2);
       document.getElementById('lv-sl').textContent    = '$' + smc.stop_loss.toFixed(2);
       document.getElementById('lv-tp').textContent    = '$' + smc.take_profit.toFixed(2);
       document.getElementById('lv-rr').textContent    = smc.risk_reward.toFixed(2) + ':1';
-      lvBlock.classList.remove('hidden');
     } else {
-      lvBlock.classList.add('hidden');
+      document.getElementById('lv-entry').textContent = '—';
+      document.getElementById('lv-sl').textContent    = '—';
+      document.getElementById('lv-tp').textContent    = '—';
+      document.getElementById('lv-rr').textContent    = '—';
     }
 
     // ── SMC score pips + alignment tag ─────────────────────────────
