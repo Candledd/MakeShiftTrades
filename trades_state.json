@@ -1,0 +1,10 @@
+{
+  "cash_limit": 5000.0,
+  "active_orders": {},
+  "paper_enabled": {
+    "NQ=F": false,
+    "SPY": false,
+    "YM=F": false
+  },
+  "total_pnl": 0.0
+}

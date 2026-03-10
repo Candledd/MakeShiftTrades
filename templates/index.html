@@ -200,10 +200,15 @@ header {
 .sig-proba-row { display: flex; justify-content: space-between; margin-bottom: 11px; }
 .proba-item { flex: 1; text-align: center; }
 .proba-lbl  { font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; margin-bottom: 2px; }
-.proba-val  { font-size: 12px; color: var(--text); font-weight: 600; }
+.proba-val  { font-size: 12px; font-weight: 600; transition: color .3s; }
 .proba-buy  { color: var(--bull); }
 .proba-sell { color: var(--bear); }
 .proba-hold { color: var(--muted); }
+.proba-bar-wrap { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 3px; }
+.proba-bar-fill { height: 100%; border-radius: 2px; transition: width .45s ease; }
+.proba-bar-buy  { background: var(--bull); }
+.proba-bar-sell { background: var(--bear); }
+.proba-bar-hold { background: var(--muted); }
 .sig-levels {
   display: grid; grid-template-columns: 1fr 1fr; gap: 5px 6px;
   border-top: 1px solid var(--border); padding-top: 9px;
@@ -440,14 +445,17 @@ header {
         <div class="proba-item">
           <div class="proba-lbl proba-buy">BUY</div>
           <div id="pb-buy"  class="proba-val">—</div>
+          <div class="proba-bar-wrap"><div id="pb-buy-bar"  class="proba-bar-fill proba-bar-buy"  style="width:0%"></div></div>
         </div>
         <div class="proba-item">
           <div class="proba-lbl proba-hold">HOLD</div>
           <div id="pb-hold" class="proba-val">—</div>
+          <div class="proba-bar-wrap"><div id="pb-hold-bar" class="proba-bar-fill proba-bar-hold" style="width:0%"></div></div>
         </div>
         <div class="proba-item">
           <div class="proba-lbl proba-sell">SELL</div>
           <div id="pb-sell" class="proba-val">—</div>
+          <div class="proba-bar-wrap"><div id="pb-sell-bar" class="proba-bar-fill proba-bar-sell" style="width:0%"></div></div>
         </div>
       </div>
 
@@ -1049,9 +1057,9 @@ async function loadChart(preserveView = false) {
     document.getElementById('chart-title').textContent = requestedTicker + ' — loading…';
   }
 
-  // Capture the visible LOGICAL RANGE (bar indices) before any setData() calls.
-  // Logical indices are stable — after adding new bars at the end, we shift by
-  // candleDelta so the viewport still points at the same candles.
+  // Capture the visible LOGICAL RANGE (bar indices) before any async work.
+  // We only apply the restored range ONCE, after ALL setData() calls are done,
+  // so LightweightCharts cannot override it between intermediate data updates.
   let savedLogicalRange = null;
   const prevCandleCount = _candleCount;
   if (preserveView && chart && prevCandleCount > 0) {
@@ -1067,25 +1075,13 @@ async function loadChart(preserveView = false) {
     const candles = cd.candles;
     if (!candles || !candles.length) { showErr('No data for this ticker / interval.'); return; }
 
-    // Shift the logical range by the number of new bars appended so the
-    // viewport keeps pointing at the same candles after every refresh.
     const candleDelta = candles.length - prevCandleCount;
-    const restoreRange = () => {
-      if (preserveView && savedLogicalRange !== null) {
-        chart.timeScale().setVisibleLogicalRange({
-          from: savedLogicalRange.from + candleDelta,
-          to:   savedLogicalRange.to   + candleDelta,
-        });
-      }
-    };
 
     cSeries.setData(candles.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
-    restoreRange();
     vSeries.setData(candles.map(c => ({
       time: c.time, value: c.volume,
       color: c.close >= c.open ? '#26a69a30' : '#ef444430',
     })));
-    restoreRange();
 
     _rafTestTime  = candles[candles.length - 1].time;
     _rafTestPrice = candles[candles.length - 1].close;
@@ -1115,40 +1111,38 @@ async function loadChart(preserveView = false) {
         vwapSeries.setData(id.vwap && activeInds.has('vwap') ? id.vwap : []);
         vwapSeries.applyOptions({ visible: activeInds.has('vwap') });
       }
-      restoreRange();
       applyAll();
-      restoreRange();
     }
 
     // ── Restore / initialise viewport ─────────────────────────────────────
-    const restoredView = getRestorableViewState(requestedTicker, requestedItvl);
-    const savedCount   = restoredView ? (restoredView.candleCount || candles.length) : candles.length;
-    const viewDelta    = candles.length - savedCount;
-
-    let _targetFrom, _targetTo;
+    // All setData() calls are done — now apply the final range exactly once.
+    let targetFrom, targetTo;
     if (preserveView && savedLogicalRange !== null) {
-      _targetFrom = savedLogicalRange.from + candleDelta;
-      _targetTo   = savedLogicalRange.to   + candleDelta;
-    } else if (restoredView) {
-      _targetFrom = restoredView.logicalRange.from + viewDelta;
-      _targetTo   = restoredView.logicalRange.to   + viewDelta;
+      // Shift bar indices by however many new candles were appended.
+      targetFrom = savedLogicalRange.from + candleDelta;
+      targetTo   = savedLogicalRange.to   + candleDelta;
     } else {
-      _targetFrom = Math.max(0, candles.length - 150);
-      _targetTo   = candles.length;
+      const restoredView = getRestorableViewState(requestedTicker, requestedItvl);
+      if (restoredView) {
+        const viewDelta = candles.length - (restoredView.candleCount || candles.length);
+        targetFrom = restoredView.logicalRange.from + viewDelta;
+        targetTo   = restoredView.logicalRange.to   + viewDelta;
+      } else {
+        targetFrom = Math.max(0, candles.length - 150);
+        targetTo   = candles.length;
+      }
     }
-    chart.timeScale().setVisibleLogicalRange({ from: _targetFrom, to: _targetTo });
+    chart.timeScale().setVisibleLogicalRange({ from: targetFrom, to: targetTo });
 
     persistViewState(candles.length);
     persistUIState();
 
     loadSignal();         // refresh AI + MTF panels (MTF fired inside loadSignal)
 
-    // One RAF is enough: setVisibleLogicalRange() sets a user-controlled viewport
-    // flag that LightweightCharts respects on re-render, so we only need one
-    // deferred frame to handle the RAF LWC schedules after the final setData().
+    // One deferred frame to catch the render LWC schedules after setData().
     requestAnimationFrame(() => {
       if (requestId !== _chartLoadSeq || !chart) return;
-      chart.timeScale().setVisibleLogicalRange({ from: _targetFrom, to: _targetTo });
+      chart.timeScale().setVisibleLogicalRange({ from: targetFrom, to: targetTo });
     });
 
   } catch (err) {
@@ -1183,6 +1177,7 @@ function selectTicker(t) {
   syncTickerButtons();
   resetPriceScale();
   _candleCount = 0;
+  _lastAutoTradeKey = null; // new ticker — allow fresh auto-trade
   clearPersistedView();
   indData = {}; if (cSeries) cSeries.setMarkers([]);
   if (vwapSeries) vwapSeries.setData([]);
@@ -1201,6 +1196,7 @@ function setItvl(i) {
   if (activeTicker) {
     resetPriceScale();
     _candleCount = 0;
+    _lastAutoTradeKey = null; // new interval — allow fresh auto-trade
     indData = {}; if (cSeries) cSeries.setMarkers([]);
     if (vwapSeries) vwapSeries.setData([]);
     loadChart(false); startAR();
@@ -1426,10 +1422,24 @@ async function loadSignal() {
     }
 
     // ── Probabilities ────────────────────────────────────────────
-    const p = d.ml.probabilities || {};
-    document.getElementById('pb-buy').textContent  = (p.BUY  ?? 0).toFixed(1) + '%';
-    document.getElementById('pb-hold').textContent = (p.HOLD ?? 0).toFixed(1) + '%';
-    document.getElementById('pb-sell').textContent = (p.SELL ?? 0).toFixed(1) + '%';
+    const p       = ((d.ml || {}).probabilities) || {};
+    const buyPct  = p.BUY  ?? 0;
+    const holdPct = p.HOLD ?? 0;
+    const sellPct = p.SELL ?? 0;
+    const maxPct  = Math.max(buyPct, holdPct, sellPct);
+
+    document.getElementById('pb-buy').textContent  = buyPct.toFixed(1)  + '%';
+    document.getElementById('pb-hold').textContent = holdPct.toFixed(1) + '%';
+    document.getElementById('pb-sell').textContent = sellPct.toFixed(1) + '%';
+
+    document.getElementById('pb-buy-bar').style.width  = buyPct  + '%';
+    document.getElementById('pb-hold-bar').style.width = holdPct + '%';
+    document.getElementById('pb-sell-bar').style.width = sellPct + '%';
+
+    // Highlight the dominant class; dim the others
+    document.getElementById('pb-buy').style.color  = buyPct  === maxPct ? 'var(--bull)' : 'var(--border)';
+    document.getElementById('pb-hold').style.color = holdPct === maxPct ? 'var(--text)'  : 'var(--border)';
+    document.getElementById('pb-sell').style.color = sellPct === maxPct ? 'var(--bear)' : 'var(--border)';
 
     // ── SMC levels (always populated when an FVG setup exists) ───
     if (smc.entry != null) {
@@ -1508,6 +1518,8 @@ window.addEventListener('beforeunload', () => {
 
 // Latest signal cache — populated by loadSignal(), consumed by executePaperTrade()
 let _lastSignal = null;
+// Dedup key: prevents re-executing the same signal on every auto-refresh cycle
+let _lastAutoTradeKey = null;
 
 // Track the paper-status polling timer
 let _ptStatusTimer = null;
@@ -1600,7 +1612,10 @@ async function refreshOrdersList() {
 
       const qtySpan    = document.createElement('span');
       qtySpan.style.color = 'var(--muted)';
-      qtySpan.textContent = '×' + (o.qty || '');
+      // Show dollar notional when available, fall back to qty for older orders
+      qtySpan.textContent = o.notional != null
+        ? '$' + Number(o.notional).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+        : '×' + (o.qty || '');
 
       const stSpan     = document.createElement('span');
       stSpan.style.cssText = 'font-size:10px;color:var(--muted)';
@@ -1644,9 +1659,11 @@ async function cancelPaperOrder(orderId) {
 function syncToggleUI(isOn) {
   const lbl = document.getElementById('pt-status-lbl');
   if (lbl) {
-    lbl.textContent = isOn ? 'ON — Active' : 'OFF';
+    lbl.textContent = isOn ? 'ON — Auto Trading' : 'OFF';
     lbl.className   = 'pt-status-lbl ' + (isOn ? 'pt-status-on' : 'pt-status-off');
   }
+  // Switching OFF clears the dedup key so re-enabling fires on the current signal
+  if (!isOn) _lastAutoTradeKey = null;
   refreshExecuteButton();
 }
 
@@ -1695,21 +1712,21 @@ function refreshExecuteButton() {
 
   if (!isOn) {
     btn.disabled     = true;
-    btn.textContent  = 'Toggle ON to trade';
+    btn.textContent  = 'Toggle ON to auto-trade';
     btn.className    = 'pt-execute-btn';
     return;
   }
 
   if (!hasActionable) {
     btn.disabled    = true;
-    btn.textContent = 'No signal — watching…';
+    btn.textContent = '⚡ Auto: Watching for signal…';
     btn.className   = 'pt-execute-btn';
     return;
   }
 
-  // Actionable
+  // Actionable — button still works as a manual override
   btn.disabled    = false;
-  btn.textContent = `▶ Execute ${sig.signal}  ${activeTicker}`;
+  btn.textContent = `⚡ Auto ▶ ${sig.signal}  ${activeTicker}`;
   btn.className   = 'pt-execute-btn ' + (sig.signal === 'BUY' ? 'buy' : 'sell');
 }
 
@@ -1741,8 +1758,11 @@ async function executePaperTrade() {
     const d = await r.json();
 
     if (d.ok) {
+      const notional = d.notional != null
+        ? '$' + Number(d.notional).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+        : (d.qty ? d.qty + '×' : '');
       setPtMsg(
-        `✓ Order placed! ${d.side} ${d.qty}× ${d.symbol} | ID: ${d.order_id.slice(0, 8)}…`,
+        `✓ Order placed! ${d.side} ${notional} ${d.symbol} | ID: ${d.order_id.slice(0, 8)}…`,
         'ok'
       );
       refreshOrdersList();
@@ -1770,6 +1790,26 @@ loadSignal = async function() {
 function _cacheSignal(data) {
   _lastSignal = data;
   refreshExecuteButton();
+  _maybeAutoTrade();
+}
+
+// Auto-execute a trade when the toggle is ON and a new actionable signal arrives.
+// Deduplication is done via a key of ticker|side|entry|interval so the same
+// setup is never submitted twice across consecutive auto-refresh cycles.
+function _maybeAutoTrade() {
+  const toggle = document.getElementById('pt-toggle');
+  if (!toggle || !toggle.checked) return;
+
+  const sig = _lastSignal;
+  if (!sig || !sig.smc || sig.smc.entry == null) return;
+  if (sig.signal !== 'BUY' && sig.signal !== 'SELL') return;
+
+  const key = `${activeTicker}|${sig.signal}|${sig.smc.entry.toFixed(2)}|${activeItvl}`;
+  if (key === _lastAutoTradeKey) return; // already executed this setup
+
+  _lastAutoTradeKey = key;
+  setPtMsg(`⚡ Auto-executing ${sig.signal} signal…`);
+  executePaperTrade();
 }
 
 // Poll paper status every 15 s while the page is open
