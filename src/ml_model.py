@@ -752,15 +752,27 @@ class SMCMLModel:
             return {
                 "signal":        "HOLD",
                 "confidence":    0.0,
-                "probabilities": {"BUY": 0.0, "HOLD": 100.0, "SELL": 0.0},
+                "probabilities": {"BUY": 0.0, "HOLD": 0.0, "SELL": 0.0},
                 "trained":       False,
                 "training":      self._is_training(),
             }
 
         try:
-            feats     = extract_features(df)
-            last_row  = feats[FEATURE_NAMES].iloc[[-1]].fillna(0.0).clip(-10, 10)
-            X_s       = self._scaler.transform(last_row)
+            from sklearn.preprocessing import StandardScaler as _StandardScaler
+
+            feats       = extract_features(df)
+            feat_matrix = feats[FEATURE_NAMES].fillna(0.0).clip(-10, 10)
+
+            # Use a local scaler fitted on the current df so that feature
+            # magnitudes are normalised relative to the same timeframe.
+            # The training-time scaler was fitted on daily bars; applying it
+            # directly to intraday data (e.g. 5 m) would compress all
+            # return-based features near zero and cause the model to default
+            # to HOLD with near-100 % confidence on every intraday bar.
+            local_scaler = _StandardScaler()
+            feat_matrix_s = local_scaler.fit_transform(feat_matrix)
+            last_row_s    = feat_matrix_s[[-1]]
+            X_s           = last_row_s
             model_for_proba = self._calibrator if self._calibrator is not None else self._clf
             proba     = model_for_proba.predict_proba(X_s)[0]
 
@@ -785,7 +797,7 @@ class SMCMLModel:
             return {
                 "signal":        "HOLD",
                 "confidence":    0.0,
-                "probabilities": {"BUY": 0.0, "HOLD": 100.0, "SELL": 0.0},
+                "probabilities": {"BUY": 0.0, "HOLD": 0.0, "SELL": 0.0},
                 "trained":       True,
                 "training":      self._is_training(),
             }

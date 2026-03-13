@@ -37,3 +37,6 @@ htmlcov/
 
 # Jupyter notebooks checkpoints
 .ipynb_checkpoints/
+
+MEMORY.MD
+trades_state.json

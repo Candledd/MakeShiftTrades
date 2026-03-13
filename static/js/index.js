@@ -30,6 +30,10 @@ const PERIOD = {
   '1m':'5d', '3m':'5d', '5m':'5d', '15m':'1mo',
 };
 
+// Expected seconds between consecutive candles for each interval.
+// Used to detect when the backend returns a different granularity than requested.
+const ITVL_SECS = { '1m': 60, '3m': 180, '5m': 300, '15m': 900 };
+
 function getStoredState() {
   try {
     const raw = window.localStorage.getItem(UI_STATE_KEY);
@@ -432,7 +436,32 @@ async function loadChart(preserveView = false) {
     const candles = cd.candles;
     if (!candles || !candles.length) { showErr('No data for this ticker / interval.'); return; }
 
+    // Guard: verify the returned candles actually match the requested interval.
+    // yfinance can silently return aggregated (e.g. 5m) data when 1m+5d is
+    // unavailable.  Detect this by checking the first candle gap and reject
+    // before it pollutes the chart.
+    if (candles.length >= 2) {
+      const actualSecs   = candles[1].time - candles[0].time;
+      const expectedSecs = ITVL_SECS[requestedItvl];
+      if (expectedSecs && actualSecs > expectedSecs * 2) {
+        console.warn(
+          `[chart] Interval mismatch for ${requestedTicker}: ` +
+          `requested ${requestedItvl} but first candle gap is ${actualSecs}s (~${actualSecs/60}m). Discarding.`
+        );
+        // On auto-refresh silently skip; on a manual load surface the error.
+        if (!preserveView) showErr(`Data mismatch — server returned ${actualSecs/60}m candles for ${requestedItvl}.`);
+        return;
+      }
+    }
+
     const candleDelta = candles.length - prevCandleCount;
+
+    // Safety cap: if the candle count changed dramatically (e.g. because the
+    // previous fetch returned a different interval), don't try to offset the
+    // viewport — fall through to the localStorage-restore path instead.
+    if (preserveView && prevCandleCount > 0 && Math.abs(candleDelta) > prevCandleCount * 0.5) {
+      savedLogicalRange = null;
+    }
 
     cSeries.setData(candles.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
     vSeries.setData(candles.map(c => ({

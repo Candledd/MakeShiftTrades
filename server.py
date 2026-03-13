@@ -103,7 +103,7 @@ def index():
 @app.route("/api/candles")
 def api_candles():
     ticker   = request.args.get("ticker",   "SPY").strip().upper()
-    interval = request.args.get("interval", "5m")
+    interval = request.args.get("interval", "1m")
     period   = request.args.get("period",   "5d")
 
     try:
@@ -133,7 +133,7 @@ def api_candles():
 @app.route("/api/indicators")
 def api_indicators():
     ticker   = request.args.get("ticker",     "SPY").strip().upper()
-    interval = request.args.get("interval",   "5m")
+    interval = request.args.get("interval",   "1m")
     period   = request.args.get("period",     "5d")
     raw_ind  = request.args.get("indicators", "fvg,engulfing,liquidity,ob,ms,swings")
     active   = {i.strip() for i in raw_ind.split(",") if i.strip()}
@@ -283,7 +283,7 @@ def api_signal():
               confidence, reason, smc_score }
     """
     ticker   = request.args.get("ticker",   "SPY").strip().upper()
-    interval = request.args.get("interval", "5m")
+    interval = request.args.get("interval", "1m")
     period   = request.args.get("period",   "5d")
 
     try:
@@ -590,7 +590,7 @@ def api_paper_execute():
     ticker     = str(data.get("ticker",     "")).strip().upper()
     side       = str(data.get("side",       "")).strip().upper()
     confidence = float(data.get("confidence", 0))
-    interval   = str(data.get("interval", "5m")).strip() or "5m"
+    interval   = str(data.get("interval", "1m")).strip() or "1m"
     period     = str(data.get("period", "5d")).strip() or "5d"
 
     # Parse numeric order levels
