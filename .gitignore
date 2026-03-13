@@ -40,3 +40,6 @@ htmlcov/
 
 MEMORY.MD
 trades_state.json
+trades_state_backup.json
+trade_feedback.jsonl
+

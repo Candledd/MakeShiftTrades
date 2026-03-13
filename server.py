@@ -662,7 +662,12 @@ def api_paper_execute():
         },
     )
 
-    http_code = 200 if result.get("ok") else 422
+    if result.get("ok"):
+        http_code = 200
+    elif result.get("error_code") == "preflight_conflict":
+        http_code = 409
+    else:
+        http_code = 422
     return jsonify(result), http_code
 
 

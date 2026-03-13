@@ -25,7 +25,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, OrderStatus, QueryOrderStatus, TimeInForce
@@ -339,6 +339,62 @@ class AlpacaTrader:
         notional      = min(notional, available_capital)
         return max(1.0, round(notional, 2))
 
+    # ── Preflight conflict guards ─────────────────────────────────────────────
+
+    def _list_open_orders_for_symbol(self, symbol: str) -> List[Any]:
+        """Return currently open Alpaca orders for a specific symbol."""
+        orders = self._client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN))
+        return [o for o in orders if str(getattr(o, "symbol", "")).upper() == symbol.upper()]
+
+    def _position_side_for_symbol(self, symbol: str) -> Optional[str]:
+        """Return 'LONG'/'SHORT' if a live position exists for symbol, else None."""
+        try:
+            positions = self._client.get_all_positions()
+        except Exception:
+            # Position visibility issues should not hard-fail order flow.
+            return None
+
+        for pos in positions:
+            if str(getattr(pos, "symbol", "")).upper() != symbol.upper():
+                continue
+            raw_side = getattr(pos, "side", "")
+            side_str = str(getattr(raw_side, "value", raw_side)).strip().upper()
+            if side_str in {"LONG", "SHORT"}:
+                return side_str
+        return None
+
+    def _preflight_symbol_conflict(self, symbol: str, side: str) -> Tuple[bool, str]:
+        """Block non-entry bracket attempts before sending to Alpaca.
+
+        Alpaca rejects bracket orders with `bracket orders must be entry orders`
+        when there is an active order chain or existing position on the symbol.
+        This guard turns those into deterministic, actionable responses.
+        """
+        desired = side.upper()
+
+        open_orders = self._list_open_orders_for_symbol(symbol)
+        if open_orders:
+            o = open_orders[0]
+            oid = str(getattr(o, "id", ""))
+            o_side = str(getattr(getattr(o, "side", ""), "value", getattr(o, "side", ""))).upper()
+            o_status = str(getattr(getattr(o, "status", ""), "value", getattr(o, "status", ""))).upper()
+            return False, (
+                f"Existing open order on {symbol} ({o_side}/{o_status}, id={oid[:8]}...). "
+                "Skip new entry until it fills/closes or cancel it first."
+            )
+
+        pos_side = self._position_side_for_symbol(symbol)
+        if pos_side is None:
+            return True, "OK"
+
+        if (desired == "BUY" and pos_side == "LONG") or (desired == "SELL" and pos_side == "SHORT"):
+            return False, f"Existing {pos_side} position on {symbol}. Duplicate same-side entry blocked."
+
+        return False, (
+            f"Existing {pos_side} position on {symbol} conflicts with {desired} bracket entry. "
+            "Flatten the position first."
+        )
+
     # ── Place bracket order ────────────────────────────────────────────────────
 
     def place_bracket_order(
@@ -363,6 +419,16 @@ class AlpacaTrader:
         Returns a dict with key "ok" plus context on success or error details.
         """
         alpaca_ticker = self.map_ticker(ticker)
+
+        # ── Step 0: Preflight conflict guard ──────────────────────────────────
+        pre_ok, pre_msg = self._preflight_symbol_conflict(alpaca_ticker, side)
+        if not pre_ok:
+            logger.warning("[PRECHECK BLOCKED] %s/%s — %s", ticker, alpaca_ticker, pre_msg)
+            return {
+                "ok": False,
+                "error": pre_msg,
+                "error_code": "preflight_conflict",
+            }
 
         # ── Step 1: Double-check validation ───────────────────────────────────
         valid, reason = validate_order(
