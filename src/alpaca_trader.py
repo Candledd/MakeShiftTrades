@@ -207,6 +207,8 @@ class AlpacaTrader:
                 data.setdefault("active_orders", {})
                 data.setdefault("paper_enabled", {})
                 data.setdefault("total_pnl",     0.0)
+                data.setdefault("order_journal", {})
+                data.setdefault("ml_feedback_queue", [])
                 return data
             except (json.JSONDecodeError, OSError) as exc:
                 logger.warning("Could not read trades_state.json: %s", exc)
@@ -216,6 +218,8 @@ class AlpacaTrader:
             "active_orders": {},   # {alpaca_symbol: order_id}
             "paper_enabled": {},   # {original_ticker: bool}
             "total_pnl":     0.0,
+            "order_journal": {},   # {order_id: {...}}
+            "ml_feedback_queue": [],
         }
 
     def _save_state(self) -> None:
@@ -346,6 +350,7 @@ class AlpacaTrader:
         take_profit: float,
         confidence: float,
         current_price: float,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Validate and submit a bracket order (entry + limit TP + stop SL).
 
@@ -444,30 +449,49 @@ class AlpacaTrader:
 
         order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
 
-        def _build_req() -> MarketOrderRequest:
-            return MarketOrderRequest(
+        def _build_req(use_qty: bool = False) -> MarketOrderRequest:
+            common = dict(
                 symbol=alpaca_ticker,
-                notional=notional,
                 side=order_side,
                 time_in_force=TimeInForce.DAY,
                 order_class=OrderClass.BRACKET,
                 take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
                 stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
             )
+            if use_qty:
+                ref_px = ref if ref > 0 else max(entry, 0.01)
+                qty = max(1, int(notional / ref_px))
+                return MarketOrderRequest(qty=qty, **common)
+            return MarketOrderRequest(notional=notional, **common)
 
         try:
             order = self._client.submit_order(_build_req())
         except Exception as first_exc:
             err_str = str(first_exc)
 
+            # Alpaca limitation: bracket orders cannot use fractional notional.
+            # Retry once with whole-share quantity sizing.
+            if "fractional orders must be simple orders" in err_str.lower():
+                try:
+                    order = self._client.submit_order(_build_req(use_qty=True))
+                except Exception as qty_exc:
+                    err_str = str(qty_exc)
+                    logger.error(
+                        "[ORDER ERROR after qty retry] %s (%s): %s",
+                        ticker, alpaca_ticker, err_str,
+                    )
+                    return {"ok": False, "error": f"Order submission error: {err_str}"}
+                else:
+                    err_str = ""
+
             # ── Alpaca bracket-leg rejection (error 42210000) ──────────────────
             # Alpaca validates SL/TP against its own fill quote (base_price), which
             # can differ from our yfinance reference by a few cents.  On this specific
             # error we parse base_price from the payload, re-clamp both legs to be
             # strictly valid, and retry exactly once.
-            if "42210000" in err_str or (
+            if err_str and ("42210000" in err_str or (
                 "base_price" in err_str and "stop_price" in err_str
-            ):
+            )):
                 bp: Optional[float] = None
                 try:
                     # SDK usually stringifies the raw JSON error body.
@@ -504,17 +528,17 @@ class AlpacaTrader:
                     return {"ok": False, "error": f"Order submission error: {err_str}"}
 
             # Rate-limit: 429
-            elif "429" in err_str or "rate limit" in err_str.lower():
+            elif err_str and ("429" in err_str or "rate limit" in err_str.lower()):
                 logger.warning("[RATE LIMITED] Alpaca API — will retry in 2 s. %s", err_str)
                 time.sleep(2)
                 return {"ok": False, "error": f"Rate limited by Alpaca API: {err_str}"}
 
             # Insufficient buying power
-            elif "insufficient" in err_str.lower() or "buying power" in err_str.lower():
+            elif err_str and ("insufficient" in err_str.lower() or "buying power" in err_str.lower()):
                 logger.error("[BUYING POWER] %s → %s", ticker, err_str)
                 return {"ok": False, "error": f"Insufficient buying power: {err_str}"}
 
-            else:
+            elif err_str:
                 logger.error("[ORDER ERROR] %s (%s): %s", ticker, alpaca_ticker, err_str)
                 return {"ok": False, "error": f"Order submission error: {err_str}"}
 
@@ -522,6 +546,19 @@ class AlpacaTrader:
 
         # Persist active order mapping
         self._state.setdefault("active_orders", {})[alpaca_ticker] = order_id
+        self._state.setdefault("order_journal", {})[order_id] = {
+            "order_id": order_id,
+            "ticker": ticker,
+            "symbol": alpaca_ticker,
+            "side": side.upper(),
+            "entry": float(entry),
+            "stop_loss": float(stop_loss),
+            "take_profit": float(take_profit),
+            "confidence": float(confidence),
+            "submitted_ts": time.time(),
+            "settled": False,
+            "metadata": metadata or {},
+        }
         self._save_state()
 
         logger.info(
@@ -543,6 +580,148 @@ class AlpacaTrader:
             "confidence":      confidence,
             "risk_fraction":   _confidence_risk_fraction(confidence),
         }
+
+    def _safe_status(self, obj: Any, fallback: str = "") -> str:
+        """Return normalized lowercase status string from Alpaca object fields."""
+        if obj is None:
+            return fallback
+        raw = getattr(obj, "value", obj)
+        return str(raw).strip().lower()
+
+    def _finalize_reason_from_order(self, order: Any, parent_side: str) -> tuple[bool, str, Optional[float]]:
+        """Infer whether trade worked and why from a terminal bracket order state."""
+        status = self._safe_status(getattr(order, "status", ""))
+
+        if status in {"rejected", "canceled", "cancelled", "expired"}:
+            return False, f"order_{status}", None
+
+        legs = getattr(order, "legs", None) or []
+        for leg in legs:
+            leg_status = self._safe_status(getattr(leg, "status", ""))
+            if leg_status != "filled":
+                continue
+
+            leg_type = self._safe_status(getattr(leg, "order_type", ""))
+            exit_px = None
+            try:
+                if getattr(leg, "filled_avg_price", None) is not None:
+                    exit_px = float(leg.filled_avg_price)
+            except (TypeError, ValueError):
+                exit_px = None
+
+            if "limit" in leg_type:
+                return True, "take_profit_hit", exit_px
+            if "stop" in leg_type:
+                return False, "stop_loss_hit", exit_px
+
+        if status == "filled":
+            return True, "filled_without_leg_detail", None
+
+        return False, f"terminal_{status or 'unknown'}", None
+
+    def sync_closed_trades(self) -> Dict[str, Any]:
+        """Poll Alpaca for terminal orders, derive outcomes, and queue ML feedback."""
+        journals = self._state.get("order_journal", {})
+        if not journals:
+            return {"ok": True, "processed": 0, "queued": 0}
+
+        processed = 0
+        queued = 0
+
+        for order_id, rec in list(journals.items()):
+            if rec.get("settled"):
+                continue
+
+            try:
+                order = self._client.get_order_by_id(order_id)
+            except Exception as exc:
+                logger.warning("sync_closed_trades: get_order_by_id(%s) failed: %s", order_id, exc)
+                continue
+
+            status = self._safe_status(getattr(order, "status", ""))
+            terminal_states = {
+                "filled", "canceled", "cancelled", "rejected", "expired", "done_for_day"
+            }
+            if status not in terminal_states:
+                continue
+
+            worked, reason, exit_price = self._finalize_reason_from_order(order, rec.get("side", "BUY"))
+            entry_price = float(rec.get("entry", 0.0) or 0.0)
+            side = str(rec.get("side", "BUY")).upper()
+            pnl_pct = 0.0
+            if exit_price and entry_price > 0:
+                signed = (exit_price - entry_price) / entry_price
+                if side == "SELL":
+                    signed *= -1.0
+                pnl_pct = float(signed * 100.0)
+
+            feedback = {
+                "order_id": order_id,
+                "ticker": rec.get("ticker"),
+                "symbol": rec.get("symbol"),
+                "side": side,
+                "worked": bool(worked),
+                "result_reason": reason,
+                "entry": entry_price,
+                "exit_price": exit_price,
+                "pnl_pct": pnl_pct,
+                "confidence": float(rec.get("confidence", 0.0) or 0.0),
+                "submitted_ts": float(rec.get("submitted_ts", time.time())),
+                "closed_ts": time.time(),
+                "feature_row": (rec.get("metadata") or {}).get("feature_row"),
+                "signal_reason": (rec.get("metadata") or {}).get("signal_reason"),
+            }
+
+            self._state.setdefault("ml_feedback_queue", []).append(feedback)
+            rec["settled"] = True
+            rec["result_reason"] = reason
+            rec["worked"] = bool(worked)
+            rec["closed_ts"] = time.time()
+
+            sym = str(rec.get("symbol", ""))
+            if sym and self._state.get("active_orders", {}).get(sym) == order_id:
+                del self._state["active_orders"][sym]
+
+            processed += 1
+            queued += 1
+
+        self._save_state()
+        return {"ok": True, "processed": processed, "queued": queued}
+
+    def drain_ml_feedback_queue(self) -> list[Dict[str, Any]]:
+        """Return and clear queued trade-outcome feedback records."""
+        queue = self._state.get("ml_feedback_queue", [])
+        if not queue:
+            return []
+        self._state["ml_feedback_queue"] = []
+        self._save_state()
+        return list(queue)
+
+    def get_recent_outcomes(self, limit: int = 50) -> Dict[str, Any]:
+        """Return recent settled paper-trade outcomes with reason labels."""
+        journal = self._state.get("order_journal", {})
+        rows: list[Dict[str, Any]] = []
+        for _, rec in journal.items():
+            if not rec.get("settled"):
+                continue
+            rows.append({
+                "order_id": rec.get("order_id"),
+                "ticker": rec.get("ticker"),
+                "symbol": rec.get("symbol"),
+                "side": rec.get("side"),
+                "worked": bool(rec.get("worked", False)),
+                "reason": rec.get("result_reason", "unknown"),
+                "entry": rec.get("entry"),
+                "stop_loss": rec.get("stop_loss"),
+                "take_profit": rec.get("take_profit"),
+                "confidence": rec.get("confidence"),
+                "submitted_ts": rec.get("submitted_ts"),
+                "closed_ts": rec.get("closed_ts"),
+                "signal_reason": (rec.get("metadata") or {}).get("signal_reason"),
+            })
+
+        rows.sort(key=lambda x: float(x.get("closed_ts") or 0.0), reverse=True)
+        return {"ok": True, "count": len(rows), "outcomes": rows[:max(1, int(limit))]}
 
     # ── Profit callback (call after a position closes to grow cap) ─────────────
 

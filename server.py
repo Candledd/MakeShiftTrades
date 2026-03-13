@@ -7,6 +7,7 @@ Then open  http://localhost:5000  in your browser.
 """
 import logging
 import threading
+import time
 import traceback
 
 import pandas as pd
@@ -52,6 +53,34 @@ def _bg_train() -> None:
 
 
 threading.Thread(target=_bg_train, daemon=True).start()
+
+
+def _bg_trade_feedback() -> None:
+    """Continuously sync Alpaca trade outcomes into the ML feedback dataset."""
+    log = logging.getLogger(__name__)
+    while True:
+        try:
+            trader = _get_alpaca()
+            if trader is not None:
+                sync_res = trader.sync_closed_trades()
+                feedback_rows = trader.drain_ml_feedback_queue()
+                ingested = 0
+                if feedback_rows:
+                    model = _get_ml_model()
+                    for row in feedback_rows:
+                        if model.add_trade_feedback(row):
+                            ingested += 1
+                if sync_res.get("processed") or ingested:
+                    log.info(
+                        "Trade feedback sync: processed=%s queued=%s ingested=%s",
+                        sync_res.get("processed", 0),
+                        sync_res.get("queued", 0),
+                        ingested,
+                    )
+        except Exception as exc:
+            log.warning("Trade feedback loop error: %s", exc)
+
+        time.sleep(30)
 
 
 def _to_ts(ts) -> int:
@@ -405,6 +434,7 @@ def api_mtf_signal():
 
 _alpaca_trader = None
 _alpaca_init_error: str = ""
+_alpaca_lock = threading.Lock()
 
 
 def _get_alpaca():
@@ -412,15 +442,23 @@ def _get_alpaca():
     global _alpaca_trader, _alpaca_init_error
     if _alpaca_trader is not None:
         return _alpaca_trader
-    try:
-        from src.alpaca_trader import AlpacaTrader
-        _alpaca_trader = AlpacaTrader()
-        _alpaca_init_error = ""
-    except Exception as exc:
-        _alpaca_init_error = str(exc)
-        logging.getLogger(__name__).error("AlpacaTrader init failed: %s", exc)
-        _alpaca_trader = None
+
+    with _alpaca_lock:
+        if _alpaca_trader is not None:
+            return _alpaca_trader
+        try:
+            from src.alpaca_trader import AlpacaTrader
+
+            _alpaca_trader = AlpacaTrader()
+            _alpaca_init_error = ""
+        except Exception as exc:
+            _alpaca_init_error = str(exc)
+            logging.getLogger(__name__).error("AlpacaTrader init failed: %s", exc)
+            _alpaca_trader = None
     return _alpaca_trader
+
+
+threading.Thread(target=_bg_trade_feedback, daemon=True).start()
 
 
 @app.route("/api/paper/account")
@@ -439,6 +477,19 @@ def api_paper_orders():
     if trader is None:
         return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
     return jsonify(trader.get_active_orders())
+
+
+@app.route("/api/paper/outcomes")
+def api_paper_outcomes():
+    """Return recent settled paper-trade outcomes with reason labels."""
+    trader = _get_alpaca()
+    if trader is None:
+        return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
+    try:
+        limit = int(request.args.get("limit", 50))
+    except ValueError:
+        limit = 50
+    return jsonify(trader.get_recent_outcomes(limit=limit))
 
 
 @app.route("/api/paper/cancel/<order_id>", methods=["DELETE"])
@@ -539,6 +590,8 @@ def api_paper_execute():
     ticker     = str(data.get("ticker",     "")).strip().upper()
     side       = str(data.get("side",       "")).strip().upper()
     confidence = float(data.get("confidence", 0))
+    interval   = str(data.get("interval", "5m")).strip() or "5m"
+    period     = str(data.get("period", "5d")).strip() or "5d"
 
     # Parse numeric order levels
     try:
@@ -581,6 +634,20 @@ def api_paper_execute():
         )
         current_price = entry  # stale-entry guard will still run using entry ≈ entry
 
+    # Build an ML feature snapshot at decision time so closed trades can
+    # become supervised feedback samples.
+    feature_row = None
+    signal_reason = str(data.get("reason", "")).strip()
+    try:
+        from src.ml_model import FEATURE_NAMES, extract_features
+
+        feat_df = fetch_ohlcv(ticker, period=period, interval=interval)
+        feat_mat = extract_features(feat_df)
+        last = feat_mat[FEATURE_NAMES].iloc[[-1]].fillna(0.0).clip(-10, 10).iloc[0]
+        feature_row = {k: float(last[k]) for k in FEATURE_NAMES}
+    except Exception as feat_exc:
+        logging.getLogger(__name__).warning("Could not snapshot ML features for %s: %s", ticker, feat_exc)
+
     result = trader.place_bracket_order(
         ticker=ticker,
         side=side,
@@ -589,6 +656,10 @@ def api_paper_execute():
         take_profit=take_profit,
         confidence=confidence,
         current_price=current_price,
+        metadata={
+            "feature_row": feature_row,
+            "signal_reason": signal_reason,
+        },
     )
 
     http_code = 200 if result.get("ok") else 422
