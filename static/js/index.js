@@ -915,6 +915,8 @@ window.addEventListener('beforeunload', () => {
 let _lastSignal = null;
 // Dedup key: prevents re-executing the same signal on every auto-refresh cycle
 let _lastAutoTradeKey = null;
+// Set to true while any open orders exist; blocks auto-trade until they clear
+let _hasOpenOrders = false;
 
 // Track the paper-status polling timer
 let _ptStatusTimer = null;
@@ -987,9 +989,12 @@ async function refreshOrdersList() {
 
     list.innerHTML = '';
     if (!d.orders || d.orders.length === 0) {
+      _hasOpenOrders = false;
+      _lastAutoTradeKey = null; // allow fresh auto-trade once orders clear
       wrap.style.display = 'none';
       return;
     }
+    _hasOpenOrders = true;
     wrap.style.display = 'block';
     for (const o of d.orders) {
       const sideClass = o.side && o.side.toLowerCase().includes('buy')
@@ -1199,7 +1204,12 @@ function _maybeAutoTrade() {
   if (!sig || !sig.smc || sig.smc.entry == null) return;
   if (sig.signal !== 'BUY' && sig.signal !== 'SELL') return;
 
-  const key = `${activeTicker}|${sig.signal}|${sig.smc.entry.toFixed(2)}|${activeItvl}`;
+  // Don't attempt a new entry while any orders are still open
+  if (_hasOpenOrders) return;
+
+  // Key on direction only (not entry price) — entry fluctuates every candle on
+  // 1m bars and would otherwise re-fire on every auto-refresh cycle.
+  const key = `${activeTicker}|${sig.signal}|${activeItvl}`;
   if (key === _lastAutoTradeKey) return; // already executed this setup
 
   _lastAutoTradeKey = key;

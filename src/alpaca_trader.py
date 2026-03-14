@@ -48,6 +48,7 @@ TICKER_MAP: Dict[str, str] = {
     "RTY=F": "IWM",   # Russell 2000 futures→ iShares Russell 2000 ETF
     "GC=F":  "GLD",   # Gold futures        → SPDR Gold Shares ETF
     "CL=F":  "USO",   # Crude oil futures   → United States Oil ETF
+    "BTC": "BTCUSD", # Bitcoin             → BTC/USD crypto pair
 }
 
 # Starting hard cash limit (grows with realised profits).
@@ -347,13 +348,12 @@ class AlpacaTrader:
         return [o for o in orders if str(getattr(o, "symbol", "")).upper() == symbol.upper()]
 
     def _position_side_for_symbol(self, symbol: str) -> Optional[str]:
-        """Return 'LONG'/'SHORT' if a live position exists for symbol, else None."""
-        try:
-            positions = self._client.get_all_positions()
-        except Exception:
-            # Position visibility issues should not hard-fail order flow.
-            return None
+        """Return 'LONG'/'SHORT' if a live position exists for symbol, else None.
 
+        Raises on API failure — callers must catch to avoid treating an error
+        as "no position exists" and allowing a conflicting order through.
+        """
+        positions = self._client.get_all_positions()
         for pos in positions:
             if str(getattr(pos, "symbol", "")).upper() != symbol.upper():
                 continue
@@ -372,7 +372,14 @@ class AlpacaTrader:
         """
         desired = side.upper()
 
-        open_orders = self._list_open_orders_for_symbol(symbol)
+        try:
+            open_orders = self._list_open_orders_for_symbol(symbol)
+        except Exception as exc:
+            logger.warning(
+                "Open-orders check failed for %s: %s — blocking as precaution.", symbol, exc
+            )
+            return False, f"Could not verify open orders for {symbol}: {exc}. Try again shortly."
+
         if open_orders:
             o = open_orders[0]
             oid = str(getattr(o, "id", ""))
@@ -383,7 +390,14 @@ class AlpacaTrader:
                 "Skip new entry until it fills/closes or cancel it first."
             )
 
-        pos_side = self._position_side_for_symbol(symbol)
+        try:
+            pos_side = self._position_side_for_symbol(symbol)
+        except Exception as exc:
+            logger.warning(
+                "Position check failed for %s: %s — blocking as precaution.", symbol, exc
+            )
+            return False, f"Could not verify position state for {symbol}: {exc}. Try again shortly."
+
         if pos_side is None:
             return True, "OK"
 
