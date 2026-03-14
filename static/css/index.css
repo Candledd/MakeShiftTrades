@@ -372,3 +372,25 @@ header {
   font-size: 10px; color: var(--muted); margin-bottom: 3px;
 }
 .pt-acct-val { color: var(--text); font-weight: 600; }
+
+.pt-conf-row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 10px; color: var(--muted);
+  margin-top: 7px; margin-bottom: 2px;
+}
+.pt-conf-ctrl { display: flex; align-items: center; gap: 6px; }
+.pt-conf-ctrl input[type=range] {
+  -webkit-appearance: none; appearance: none;
+  width: 90px; height: 4px;
+  background: var(--border); border-radius: 2px; outline: none; cursor: pointer;
+}
+.pt-conf-ctrl input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--bull); cursor: pointer;
+}
+.pt-conf-ctrl input[type=range]::-moz-range-thumb {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--bull); cursor: pointer; border: none;
+}
+#pt-conf-val { color: var(--text); font-weight: 600; min-width: 28px; text-align: right; }

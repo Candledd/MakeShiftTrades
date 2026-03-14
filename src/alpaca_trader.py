@@ -42,14 +42,18 @@ logger = logging.getLogger(__name__)
 # Alpaca paper trading supports equities and crypto only; futures are
 # represented by their closest ETF proxy.
 TICKER_MAP: Dict[str, str] = {
-    "NQ=F":  "QQQ",   # NASDAQ-100 futures  → Invesco QQQ ETF
-    "ES=F":  "SPY",   # S&P 500 futures     → SPDR S&P 500 ETF
-    "YM=F":  "DIA",   # Dow Jones futures   → SPDR DJIA ETF
-    "RTY=F": "IWM",   # Russell 2000 futures→ iShares Russell 2000 ETF
-    "GC=F":  "GLD",   # Gold futures        → SPDR Gold Shares ETF
-    "CL=F":  "USO",   # Crude oil futures   → United States Oil ETF
-    "BTC": "BTCUSD", # Bitcoin             → BTC/USD crypto pair
+    "NQ=F":    "QQQ",     # NASDAQ-100 futures  → Invesco QQQ ETF
+    "ES=F":    "SPY",     # S&P 500 futures     → SPDR S&P 500 ETF
+    "YM=F":    "DIA",     # Dow Jones futures   → SPDR DJIA ETF
+    "RTY=F":   "IWM",     # Russell 2000 futures→ iShares Russell 2000 ETF
+    "GC=F":    "GLD",     # Gold futures        → SPDR Gold Shares ETF
+    "CL=F":    "USO",     # Crude oil futures   → United States Oil ETF
+    "BTC-USD": "BTCUSD",  # Bitcoin             → BTC/USD crypto pair
+    "ETH-USD": "ETHUSD",  # Ethereum            → ETH/USD crypto pair
 }
+
+# Alpaca symbols that are crypto pairs (trade 24/7 — use GTC not DAY)
+CRYPTO_SYMBOLS: set = {"BTCUSD", "ETHUSD", "BCHUSD", "LTCUSD", "UNIUSD", "LINKUSD"}
 
 # Starting hard cash limit (grows with realised profits).
 INITIAL_CASH_LIMIT: float = 5_000.0
@@ -530,10 +534,11 @@ class AlpacaTrader:
         order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
 
         def _build_req(use_qty: bool = False) -> MarketOrderRequest:
+            tif = TimeInForce.GTC if alpaca_ticker.upper() in CRYPTO_SYMBOLS else TimeInForce.DAY
             common = dict(
                 symbol=alpaca_ticker,
                 side=order_side,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=tif,
                 order_class=OrderClass.BRACKET,
                 take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
                 stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),

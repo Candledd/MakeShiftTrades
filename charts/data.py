@@ -1,5 +1,9 @@
+import logging
+import numpy as np
 import pandas as pd
 import yfinance as yf
+
+_log = logging.getLogger(__name__)
 
 # Maximum periods allowed by Yahoo Finance for each interval
 _MAX_PERIOD_DAYS: dict[str, int] = {
@@ -58,26 +62,73 @@ def _cap_period(period: str, interval: str) -> str:
     return result
 
 
+def _fix_flat_ohlcv(df: pd.DataFrame, ticker: str = "", interval: str = "") -> pd.DataFrame:
+    """Yahoo Finance returns Open=High=Low=Close for 1m crypto bars because
+    it only stores last-trade snapshots, not proper OHLC tick aggregations.
+    When ≥80% of bars are detected flat, synthesise Open/High/Low from
+    consecutive Close prices: Open[i] = Close[i-1], which is the standard
+    convention for tick-level data and matches what the 3m resampled bars
+    already produce naturally.
+    """
+    if len(df) < 2:
+        return df
+    flat = (
+        (df["Open"] == df["Close"]) &
+        (df["High"] == df["Close"]) &
+        (df["Low"]  == df["Close"])
+    )
+    if flat.mean() < 0.80:
+        return df
+    _log.info(
+        "Synthesising OHLC for %s %s (%.0f%% flat bars — Yahoo last-price data)",
+        ticker, interval, flat.mean() * 100,
+    )
+    closes = df["Close"].to_numpy(dtype=float)
+    opens  = np.empty_like(closes)
+    opens[0]  = closes[0]      # first bar has no prior close
+    opens[1:] = closes[:-1]    # all others: open = previous close
+    highs = np.maximum(opens, closes)
+    lows  = np.minimum(opens, closes)
+    df = df.copy()
+    df["Open"]  = opens
+    df["High"]  = highs
+    df["Low"]   = lows
+    return df
+
+
 def _fetch_raw(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    """Download and normalise a single yfinance-supported interval."""
+    """Download and normalise a single yfinance-supported interval.
+
+    Uses Ticker.history() instead of yf.download() to guarantee a flat column
+    structure regardless of yfinance version. yf.download() with a single
+    crypto ticker can return a MultiIndex where level-0 is the ticker symbol
+    (not the price field), causing all OHLC columns to resolve to the same
+    closing price and rendering flat doji candles with no wicks.
+    """
     period = _cap_period(period, interval)
-    df: pd.DataFrame = yf.download(
-        ticker,
+    df: pd.DataFrame = yf.Ticker(ticker).history(
         period=period,
         interval=interval,
         auto_adjust=True,
-        progress=False,
     )
     if df.empty:
         raise ValueError(f"No data returned for ticker '{ticker}'.")
 
-    # yfinance ≥ 0.2 may return MultiIndex columns when downloading one symbol
+    # history() returns flat columns; defensive MultiIndex guard for edge cases.
+    # yfinance can return MultiIndex with either (field, ticker) or (ticker, field)
+    # ordering depending on the interval/version, so check which level holds the
+    # OHLCV field names rather than blindly taking level 0.
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+        _ohlcv = {"Open", "High", "Low", "Close", "Volume"}
+        _lvl0 = set(df.columns.get_level_values(0))
+        if _ohlcv.issubset(_lvl0):
+            df.columns = df.columns.get_level_values(0)
+        else:
+            df.columns = df.columns.get_level_values(1)
 
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
     df.index = pd.to_datetime(df.index)
-    return df
+    return _fix_flat_ohlcv(df, ticker, interval)
 
 
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:

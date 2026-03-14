@@ -1138,12 +1138,13 @@ async function executePaperTrade() {
   }
 
   const payload = {
-    ticker:      activeTicker,
-    side:        sig.signal,           // "BUY" or "SELL"
-    entry:       sig.smc.entry,
-    stop_loss:   sig.smc.stop_loss,
-    take_profit: sig.smc.take_profit,
-    confidence:  sig.confidence,
+    ticker:         activeTicker,
+    side:           sig.signal,           // "BUY" or "SELL"
+    entry:          sig.smc.entry,
+    stop_loss:      sig.smc.stop_loss,
+    take_profit:    sig.smc.take_profit,
+    confidence:     sig.confidence,
+    min_confidence: _getMinConf(),
   };
 
   setPtMsg('Submitting bracket order…');
@@ -1193,6 +1194,16 @@ function _cacheSignal(data) {
   _maybeAutoTrade();
 }
 
+function _getMinConf() {
+  const el = document.getElementById('pt-conf-slider');
+  return el ? parseInt(el.value, 10) : 60;
+}
+
+function updateConfSlider(val) {
+  const v = document.getElementById('pt-conf-val');
+  if (v) v.textContent = val + '%';
+}
+
 // Auto-execute a trade when the toggle is ON and a new actionable signal arrives.
 // Deduplication is done via a key of ticker|side|entry|interval so the same
 // setup is never submitted twice across consecutive auto-refresh cycles.
@@ -1206,6 +1217,9 @@ function _maybeAutoTrade() {
 
   // Don't attempt a new entry while any orders are still open
   if (_hasOpenOrders) return;
+
+  // Enforce the min-confidence threshold before auto-executing
+  if ((sig.confidence || 0) < _getMinConf()) return;
 
   // Key on direction only (not entry price) — entry fluctuates every candle on
   // 1m bars and would otherwise re-fire on every auto-refresh cycle.

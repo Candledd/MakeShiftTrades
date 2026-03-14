@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -181,6 +181,16 @@
                 onclick="executePaperTrade()">
           Enable trading to execute
         </button>
+
+        <!-- Min-confidence threshold slider -->
+        <div class="pt-conf-row">
+          <span>Min Confidence</span>
+          <div class="pt-conf-ctrl">
+            <input type="range" id="pt-conf-slider" min="50" max="95" step="5" value="60"
+                   oninput="updateConfSlider(this.value)">
+            <span id="pt-conf-val">60%</span>
+          </div>
+        </div>
 
         <!-- Feedback message -->
         <div id="pt-msg" class="pt-msg"></div>

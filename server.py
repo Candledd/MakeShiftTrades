@@ -38,7 +38,7 @@ from charts.indicators.levels import (
 
 app = Flask(__name__)
 
-TICKERS = ["NQ=F", "ES=F", "YM=F", "RTY=F", "SPY", "QQQ", "AAPL", "TSLA", "GC=F", "CL=F"]
+TICKERS = ["NQ=F", "ES=F", "YM=F", "RTY=F", "SPY", "QQQ", "AAPL", "TSLA", "GC=F", "CL=F", "BTC-USD", "ETH-USD"]
 
 # ── Background ML training (fires once at server start) ────────────────────────
 from src.ml_model import get_model as _get_ml_model
@@ -612,9 +612,11 @@ def api_paper_execute():
                      "Toggle it ON in the dashboard first.",
         }), 409
 
-    # Guard: minimum confidence threshold (60 %)
+    # Guard: minimum confidence threshold (from slider override or config default)
     import config as _cfg
-    min_conf = getattr(_cfg, "PAPER_MIN_CONFIDENCE", 60.0)
+    _raw_min = data.get("min_confidence")
+    min_conf = float(_raw_min) if _raw_min is not None else getattr(_cfg, "PAPER_MIN_CONFIDENCE", 60.0)
+    min_conf = max(50.0, min(95.0, min_conf))  # clamp to valid range
     if confidence < min_conf:
         return jsonify({
             "ok":    False,
