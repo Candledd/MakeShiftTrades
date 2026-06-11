@@ -291,6 +291,17 @@ class TradingEngine:
     # Execute a signal through the risk + trading pipeline
     # ──────────────────────────────────────────────────────────────────────
 
+    def _get_signal_regime(self, strategy_name: str) -> str:
+        """Map a strategy name to its current market regime from the AI Tuner."""
+        if strategy_name in ("mean_reversion", "trend_pullback"):
+            return self.ai_tuner.current_regimes.get("Equity", "unknown")
+        elif strategy_name == "momentum_breakout":
+            return self.ai_tuner.current_regimes.get("Crypto", "unknown")
+        elif strategy_name == "trend_following":
+            return self.ai_tuner.current_regimes.get("Commodity", "unknown")
+        return "unknown"
+
+
     def _execute_signal(self, signal: StrategySignal, df: pd.DataFrame = None) -> None:
         """Run approval pipeline and — if approved — place the order.
 
@@ -381,6 +392,7 @@ class TradingEngine:
         approved, notional, reason = self.risk_manager.approve(
             signal, equity, positions, active_orders,
             position_state=self._position_state,
+            signal_regime=self._get_signal_regime(signal.strategy_name),
         )
 
         # --- SIGNAL TELEMETRY DUMP ---
@@ -474,6 +486,7 @@ class TradingEngine:
             st['qty'] = notional / signal.entry
             st['side'] = signal.direction
             st['strategy'] = signal.strategy_name
+            st['regime'] = self._get_signal_regime(signal.strategy_name)
             logger.info(
                 "[ORDER PLACED] %s %s $%.2f | ID: %s",
                 signal.direction,
@@ -519,7 +532,7 @@ class TradingEngine:
     def _close_and_log_position(
         self, sym: str, state: dict, current_price: float,
         unrealized_pl: float, exit_reason: str, qty_pct: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """Calculate MFE/MAE, log trade, and close position (full or partial).
 
         Parameters
@@ -550,21 +563,31 @@ class TradingEngine:
             logger.error("Failed to close position %s: %s", sym, e)
             return False
 
+        # Calculate exact fraction closed for accurate R-multiple logging
+        closed_fraction = float(qty_pct) / 100.0 if qty_pct else 1.0
+        logged_qty = state.get('qty', 0) * closed_fraction
+        logged_pnl = unrealized_pl * closed_fraction
+
         # Log the trade only after successful close
-        log_trade(
-            symbol=sym,
-            strategy=state.get('strategy', 'unknown'),
-            direction=side,
-            entry_price=_entry,
-            exit_price=current_price,
-            stop_loss=state.get('stop_loss', 0),
-            qty=state.get('qty', 0),
-            pnl=unrealized_pl,
-            mfe=_mfe,
-            mae=_mae,
-            hold_hours=(time.time() - state.get('open_ts', time.time())) / 3600.0,
-            exit_reason=exit_reason,
-        )
+        try:
+            log_trade(
+                symbol=sym,
+                strategy=state.get('strategy', 'unknown'),
+                direction=side,
+                entry_price=_entry,
+                exit_price=current_price,
+                stop_loss=state.get('stop_loss', 0.0),
+                qty=logged_qty,
+                pnl=logged_pnl,
+                mfe=_mfe,
+                mae=_mae,
+                hold_hours=(time.time() - state.get('open_ts', time.time())) / 3600.0,
+                exit_reason=exit_reason,
+                regime=state.get('regime', 'unknown'),
+            )
+        except Exception as e:
+            logger.error("Failed to log trade to DB for %s: %s", sym, e)
+
         return True
 
     def _manage_positions(self) -> None:
@@ -616,8 +639,10 @@ class TradingEngine:
                     if (side == 'long' and current_price <= state['stop_loss']) or \
                        (side == 'short' and current_price >= state['stop_loss']):
                         logger.info("Closing crypto position %s due to synthetic stop loss", sym)
-                        self._close_and_log_position(sym, state, current_price, unrealized_pl, 'synthetic_sl')
-                        del self._position_state[sym]
+                        if self._close_and_log_position(sym, state, current_price, unrealized_pl, 'synthetic_sl'):
+                            del self._position_state[sym]
+                        else:
+                            logger.warning("Synthetic SL close failed; preserving state for retry")
                         continue
 
                 # 2. Synthetic Take Profit (Partial 1.5R or full if TP is set)
@@ -626,7 +651,7 @@ class TradingEngine:
                     if (side == 'long' and current_price >= state['take_profit']) or \
                        (side == 'short' and current_price <= state['take_profit']):
                         logger.info("Taking partial profit on %s due to synthetic take-profit limit", sym)
-                        if self._close_and_log_position(sym, state, current_price, unrealized_pl * 0.5, 'synthetic_tp', qty_pct="50"):
+                        if self._close_and_log_position(sym, state, current_price, unrealized_pl, 'synthetic_tp', qty_pct="50"):
                             state['tp_filled'] = True
                             state['qty'] = state.get('qty', 0) * 0.5
                             # We keep tracking it as a runner now.
@@ -646,8 +671,10 @@ class TradingEngine:
 
             if should_close:
                 logger.info("Closing %s due to trailing stop", sym)
-                self._close_and_log_position(sym, state, current_price, unrealized_pl, 'trailing_stop')
-                del self._position_state[sym]
+                if self._close_and_log_position(sym, state, current_price, unrealized_pl, 'trailing_stop'):
+                    del self._position_state[sym]
+                else:
+                    logger.warning("Trailing stop close failed; preserving state for retry")
                 continue
 
             # ── Time Stop (per-asset-class) ────────────────────────────
@@ -665,8 +692,10 @@ class TradingEngine:
                     "Closing %s due to time stop (%.1f hours)",
                     sym, time_stop_hours,
                 )
-                self._close_and_log_position(sym, state, current_price, unrealized_pl, 'time_stop')
-                del self._position_state[sym]
+                if self._close_and_log_position(sym, state, current_price, unrealized_pl, 'time_stop'):
+                    del self._position_state[sym]
+                else:
+                    logger.warning("Time stop close failed; preserving state for retry")
 
     # ──────────────────────────────────────────────────────────────────────
     # Status logging

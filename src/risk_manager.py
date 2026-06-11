@@ -286,9 +286,14 @@ class RiskManager:
                 heat_symbols.add(sym)
         for sym in heat_symbols:
             state = position_state.get(sym)
-            if state is not None:
-                risk_usd = abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0)
+            if state is not None and "entry_price" in state and "stop_loss" in state:
+                risk_usd = abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0.0)
                 total_risk_usd += risk_usd
+            else:
+                # Fallback after restart if state is missing
+                pos = next((p for p in current_positions if p.get('symbol') == sym), None)
+                if pos:
+                    total_risk_usd += pos.get('market_value', 0.0) * 0.05
 
         # ── Include proposed trade risk in portfolio heat ─────────────
         if proposed_notional > 0 and signal.entry > 0:
@@ -314,8 +319,12 @@ class RiskManager:
             for sym in heat_symbols:
                 if sym in cluster_set or self._ticker_map.get(sym, sym) in cluster_set:
                     state = position_state.get(sym)
-                    if state is not None:
-                        risk += abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0)
+                    if state is not None and "entry_price" in state and "stop_loss" in state:
+                        risk += abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0.0)
+                    else:
+                        pos = next((p for p in current_positions if p.get('symbol') == sym), None)
+                        if pos:
+                            risk += pos.get('market_value', 0.0) * 0.05
             return risk
 
         if account_equity > 0:
@@ -412,9 +421,14 @@ class RiskManager:
 
     # ── Signal Validation ──────────────────────────────────────────────
 
-    def validate_signal(self, signal: StrategySignal) -> tuple[bool, str]:
+    def validate_signal(
+        self, signal: StrategySignal, signal_regime: str | None = None
+    ) -> tuple[bool, str]:
         """Validate the signal's price, stop, R/R, direction consistency,
-        and ATR-based spread/liquidity cap.
+        ATR-based spread/liquidity cap, and strategy expectancy.
+
+        ``signal_regime`` is an optional regime label used for granular
+        expectancy filtering (e.g. ``"bullish_calm"``).
 
         Returns ``(True, "OK")`` or ``(False, reason)``.
         """
@@ -462,7 +476,14 @@ class RiskManager:
             return (False, spread_reason)
 
         # 7. Strategy expectancy gate — reject trades with negative expected value
-        ev_r, sample_size = get_strategy_expectancy(signal.strategy_name, signal.direction)
+        #    Two-tier granular check: first with symbol + regime, fall back to
+        #    broader strategy+direction when the sample is too small.
+        ev_r, sample_size = get_strategy_expectancy(
+            signal.strategy_name, signal.direction,
+            symbol=signal.ticker, regime=signal_regime,
+        )
+        if sample_size < _cfg.MIN_EXPECTANCY_SAMPLES:
+            ev_r, sample_size = get_strategy_expectancy(signal.strategy_name, signal.direction)
         if sample_size >= _cfg.MIN_EXPECTANCY_SAMPLES and ev_r < _cfg.MIN_EXPECTANCY_R:
             return (
                 False,
@@ -481,8 +502,12 @@ class RiskManager:
         current_positions: list[dict],
         active_orders: list[dict] = None,
         position_state: dict = None,
+        signal_regime: Optional[str] = None,
     ) -> tuple[bool, float, str]:
         """Run the full risk pipeline: validate → correlation → size.
+
+        ``signal_regime`` is forwarded to ``validate_signal`` for granular
+        expectancy filtering.
 
         Returns ``(approved, notional, reason)``.
         """
@@ -511,7 +536,7 @@ class RiskManager:
             return (False, 0.0, f"Weekly P&L kill switch: ${weekly_pnl:.2f} exceeds limit")
 
         # 1. Validate signal
-        valid, reason = self.validate_signal(signal)
+        valid, reason = self.validate_signal(signal, signal_regime=signal_regime)
         if not valid:
             self.logger.info("Signal rejected: %s %s — %s", signal.direction, signal.ticker, reason)
             return (False, 0.0, reason)

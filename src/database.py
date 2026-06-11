@@ -59,6 +59,7 @@ def init_db() -> None:
             mae             REAL    NOT NULL,
             hold_hours      REAL    NOT NULL,
             exit_reason     TEXT    NOT NULL,
+            regime          TEXT    DEFAULT 'unknown',
             timestamp       DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         """
@@ -69,6 +70,11 @@ def init_db() -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON trade_log (timestamp)"
     )
+    # Migrate existing databases — silently skip if column already exists.
+    try:
+        conn.execute("ALTER TABLE trade_log ADD COLUMN regime TEXT DEFAULT 'unknown'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
 
 
@@ -89,6 +95,7 @@ def log_trade(
     mae: float,
     hold_hours: float,
     exit_reason: str,
+    regime: str = 'unknown',
 ) -> None:
     """Insert a completed trade into ``trade_log`` with its R-multiple.
 
@@ -106,8 +113,8 @@ def log_trade(
         INSERT INTO trade_log
             (symbol, strategy, direction, entry_price, exit_price,
              stop_loss, qty, pnl, r_multiple, mfe, mae,
-             hold_hours, exit_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             hold_hours, exit_reason, regime)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             symbol,
@@ -123,6 +130,7 @@ def log_trade(
             mae,
             hold_hours,
             exit_reason,
+            regime,
         ),
     )
     conn.commit()
@@ -135,21 +143,32 @@ def log_trade(
 def get_strategy_expectancy(
     strategy: str,
     direction: str,
+    symbol: str | None = None,
+    regime: str | None = None,
 ) -> tuple[float, int]:
     """Return ``(ev_r, sample_size)`` for a given strategy + direction.
 
+    Optionally further filter by ``symbol`` and/or ``regime``.
     ``ev_r`` is the arithmetic mean of ``r_multiple`` across all logged
     trades matching the filter.  Returns ``(0.0, 0)`` when no trades exist.
     """
     conn = _get_connection()
-    row = conn.execute(
-        """
+
+    query = """
         SELECT AVG(r_multiple) AS avg_r, COUNT(*) AS cnt
         FROM trade_log
         WHERE strategy = ? AND direction = ?
-        """,
-        (strategy, direction),
-    ).fetchone()
+    """
+    params: list = [strategy, direction]
+
+    if symbol is not None:
+        query += " AND symbol = ?"
+        params.append(symbol)
+    if regime is not None:
+        query += " AND regime = ?"
+        params.append(regime)
+
+    row = conn.execute(query, params).fetchone()
 
     if row["cnt"] == 0:
         return 0.0, 0
