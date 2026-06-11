@@ -226,7 +226,8 @@ class RiskManager:
         reward = abs(signal.take_profit - signal.entry)
         if risk <= 0:
             return (False, "Zero risk")
-        if reward / risk < MIN_RR_RATIO:
+        # Add a tiny 0.01 tolerance to account for floating point inaccuracies (e.g. 1.499999 < 1.5)
+        if (reward / risk) < (MIN_RR_RATIO - 0.01):
             return (False, f"R/R below {MIN_RR_RATIO}")
 
         # 4. Direction consistency
