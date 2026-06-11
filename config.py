@@ -482,13 +482,13 @@ for _name, _val, _label in [
     ("AI_RISK_MULTIPLIER_CRYPTO", AI_RISK_MULTIPLIER_CRYPTO, "> 0"),
     ("AI_RISK_MULTIPLIER_COMMODITY", AI_RISK_MULTIPLIER_COMMODITY, "> 0"),
 ]:
-    if _label.startswith(">= 1") and _val < 1:
+    op, limit_str = _label.split(' ')
+    limit = float(limit_str)
+    if op == ">" and not (_val > limit):
         raise ValueError(f"{_name} must be {_label}, got {_val}")
-    elif _label.startswith(">= 2") and _val < 2:
+    elif op == ">=" and not (_val >= limit):
         raise ValueError(f"{_name} must be {_label}, got {_val}")
-    elif _label.startswith("> 0") and _val <= 0:
-        raise ValueError(f"{_name} must be {_label}, got {_val}")
-    elif _label.startswith("<= 0") and _val > 0:
+    elif op == "<=" and not (_val <= limit):
         raise ValueError(f"{_name} must be {_label}, got {_val}")
 
 # ── Pre-Approved Regime Profiles (bounded, no arbitrary AI rewriting) ─────────

@@ -251,6 +251,7 @@ class RiskManager:
         active_orders: list[dict] = None,
         position_state: dict = None,
         account_equity: float = 0.0,
+        proposed_notional: float = 0.0,
     ) -> tuple[bool, str]:
         """Enforce correlation and diversification rules.
 
@@ -289,6 +290,14 @@ class RiskManager:
                 risk_usd = abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0)
                 total_risk_usd += risk_usd
 
+        # ── Include proposed trade risk in portfolio heat ─────────────
+        if proposed_notional > 0 and signal.entry > 0:
+            proposed_qty = proposed_notional / signal.entry
+            proposed_risk_usd_val = abs(signal.entry - signal.stop_loss) * proposed_qty
+            total_risk_usd += proposed_risk_usd_val
+        else:
+            proposed_risk_usd_val = 0.0
+
         if account_equity > 0 and total_risk_usd > 0:
             max_portfolio_risk_pct = _cfg.MAX_OPEN_PORTFOLIO_RISK_PCT
             if total_risk_usd / account_equity > max_portfolio_risk_pct:
@@ -311,12 +320,18 @@ class RiskManager:
 
         if account_equity > 0:
             max_cluster_pct = _cfg.MAX_CLUSTER_RISK_PCT
+            signal_resolved_ticker = self._resolve_ticker(signal.ticker)
             for cluster_name, cluster_set in [
                 ("risk-on", RISK_ON_ASSETS),
                 ("crypto", CRYPTO_ASSETS),
                 ("commodity", COMMODITY_ASSETS),
             ]:
                 cluster_risk = _cluster_risk(cluster_set)
+                # Include proposed trade risk if signal belongs to this cluster
+                if proposed_risk_usd_val > 0 and (
+                    signal.ticker in cluster_set or signal_resolved_ticker in cluster_set
+                ):
+                    cluster_risk += proposed_risk_usd_val
                 if cluster_risk > 0 and (cluster_risk / account_equity) > max_cluster_pct:
                     return (
                         False,
@@ -501,16 +516,7 @@ class RiskManager:
             self.logger.info("Signal rejected: %s %s — %s", signal.direction, signal.ticker, reason)
             return (False, 0.0, reason)
 
-        # 2. Correlation filter (now includes double-dip guard against active orders)
-        allowed, reason = self.check_correlation_filter(
-            signal, current_positions, active_orders,
-            position_state=position_state, account_equity=account_equity,
-        )
-        if not allowed:
-            self.logger.info("Signal rejected: %s %s — %s", signal.direction, signal.ticker, reason)
-            return (False, 0.0, reason)
-
-        # 3. Position sizing
+        # 2. Position sizing (calculated early for portfolio heat check)
         notional = self.calculate_position_size(signal, account_equity)
         if notional <= 0:
             self.logger.info(
@@ -519,6 +525,17 @@ class RiskManager:
                 signal.ticker,
             )
             return (False, 0.0, "Position size is zero")
+
+        # 3. Correlation filter (now includes double-dip guard against active orders
+        #    and portfolio heat check with proposed notional)
+        allowed, reason = self.check_correlation_filter(
+            signal, current_positions, active_orders,
+            position_state=position_state, account_equity=account_equity,
+            proposed_notional=notional,
+        )
+        if not allowed:
+            self.logger.info("Signal rejected: %s %s — %s", signal.direction, signal.ticker, reason)
+            return (False, 0.0, reason)
 
         self.logger.info(
             "Signal approved: %s %s $%.2f", signal.direction, signal.ticker, notional

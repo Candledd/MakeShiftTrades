@@ -531,8 +531,9 @@ class TradingEngine:
         side = state.get('side', 'long')
         _entry = state.get('entry_price', current_price)
 
-        # MFE / MAE
-        if side == 'long':
+        # MFE / MAE — normalize side for various formats ('long', 'buy', 'short', 'sell')
+        is_long = side.lower() in ('long', 'buy')
+        if is_long:
             _mfe = state.get('highest', current_price) - _entry
             _mae = _entry - state.get('lowest', current_price)
         else:
@@ -547,8 +548,9 @@ class TradingEngine:
                 self.trader._client.close_position(sym)
         except Exception as e:
             logger.error("Failed to close position %s: %s", sym, e)
+            return False
 
-        # Log the trade
+        # Log the trade only after successful close
         log_trade(
             symbol=sym,
             strategy=state.get('strategy', 'unknown'),
@@ -563,6 +565,7 @@ class TradingEngine:
             hold_hours=(time.time() - state.get('open_ts', time.time())) / 3600.0,
             exit_reason=exit_reason,
         )
+        return True
 
     def _manage_positions(self) -> None:
         """Monitor open positions and close based on trailing/stop loss or time stop."""
@@ -572,9 +575,13 @@ class TradingEngine:
         positions = self.trader.get_positions()
         current_syms = {pos['symbol'] for pos in positions}
 
+        # Fetch active orders to avoid removing state when pending orders exist
+        res = self.trader.get_active_orders()
+        active_syms = {o.get('symbol') for o in res.get('orders', [])} if res.get('ok') else set()
+
         # Clean up symbols no longer in current positions
         for sym in list(self._position_state.keys()):
-            if sym not in current_syms:
+            if sym not in current_syms and sym not in active_syms:
                 del self._position_state[sym]
 
         for pos in positions:
@@ -619,11 +626,10 @@ class TradingEngine:
                     if (side == 'long' and current_price >= state['take_profit']) or \
                        (side == 'short' and current_price <= state['take_profit']):
                         logger.info("Taking partial profit on %s due to synthetic take-profit limit", sym)
-                        # Halve the remaining qty in state before calling helper
-                        state['qty'] = state.get('qty', 0) * 0.5
-                        self._close_and_log_position(sym, state, current_price, unrealized_pl * 0.5, 'synthetic_tp', qty_pct="50")
-                        state['tp_filled'] = True
-                        # We keep tracking it as a runner now.
+                        if self._close_and_log_position(sym, state, current_price, unrealized_pl * 0.5, 'synthetic_tp', qty_pct="50"):
+                            state['tp_filled'] = True
+                            state['qty'] = state.get('qty', 0) * 0.5
+                            # We keep tracking it as a runner now.
 
             # ── Trailing Stop ──────────────────────────────────────────
             # Use ATR-based trailing if available, else fallback to percentage
