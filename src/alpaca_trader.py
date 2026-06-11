@@ -31,10 +31,14 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, OrderStatus, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
     GetOrdersRequest,
+    LimitOrderRequest,
     MarketOrderRequest,
+    ReplaceOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
 )
+
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -287,16 +291,43 @@ class AlpacaTrader:
                     "id":               str(o.id),
                     "symbol":           str(o.symbol),
                     "side":             str(o.side.value) if hasattr(o.side, "value") else str(o.side),
+                    "type":             str(o.order_type.value) if hasattr(o.order_type, "value") else str(getattr(o, "order_type", "")),
                     "qty":              str(o.qty),
                     "status":           str(o.status.value) if hasattr(o.status, "value") else str(o.status),
                     "submitted_at":     str(o.submitted_at),
-                    "filled_avg_price": float(o.filled_avg_price) if o.filled_avg_price else None,
+                    "limit_price":      float(o.limit_price) if getattr(o, "limit_price", None) else None,
+                    "stop_price":       float(o.stop_price) if getattr(o, "stop_price", None) else None,
+                    "filled_avg_price": float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else None,
                     "order_class":      str(o.order_class.value) if hasattr(o.order_class, "value") else str(o.order_class),
                 })
             return {"ok": True, "orders": result}
         except Exception as exc:
             logger.error("get_active_orders failed: %s", exc)
             return {"ok": False, "error": str(exc)}
+
+    # ── Get positions ──────────────────────────────────────────────────────────
+
+    def get_positions(self) -> List[Dict[str, Any]]:
+        """Return all open positions with symbol, side, qty, market_value, unrealized_pl."""
+        try:
+            positions = self._client.get_all_positions()
+            result = []
+            for pos in positions:
+                side_raw = getattr(pos, 'side', '')
+                side_str = str(getattr(side_raw, 'value', side_raw)).strip().lower()
+                result.append({
+                    'symbol': str(pos.symbol),
+                    'side': side_str,
+                    'qty': float(pos.qty),
+                    'market_value': float(pos.market_value),
+                    'unrealized_pl': float(pos.unrealized_pl) if pos.unrealized_pl else 0.0,
+                    'current_price': float(pos.current_price) if pos.current_price else 0.0,
+                    'avg_entry_price': float(pos.avg_entry_price) if pos.avg_entry_price else 0.0,
+                })
+            return result
+        except Exception as exc:
+            logger.error("get_positions failed: %s", exc)
+            return []
 
     # ── Cancel order ───────────────────────────────────────────────────────────
 
@@ -367,12 +398,16 @@ class AlpacaTrader:
                 return side_str
         return None
 
-    def _preflight_symbol_conflict(self, symbol: str, side: str) -> Tuple[bool, str]:
+    def _preflight_symbol_conflict(self, symbol: str, side: str,
+                                current_positions: Optional[List[Dict]] = None) -> Tuple[bool, str]:
         """Block non-entry bracket attempts before sending to Alpaca.
 
         Alpaca rejects bracket orders with `bracket orders must be entry orders`
         when there is an active order chain or existing position on the symbol.
         This guard turns those into deterministic, actionable responses.
+
+        If *current_positions* is provided it is used instead of calling the
+        Alpaca API to look up existing positions on the symbol.
         """
         desired = side.upper()
 
@@ -394,13 +429,23 @@ class AlpacaTrader:
                 "Skip new entry until it fills/closes or cancel it first."
             )
 
-        try:
-            pos_side = self._position_side_for_symbol(symbol)
-        except Exception as exc:
-            logger.warning(
-                "Position check failed for %s: %s — blocking as precaution.", symbol, exc
-            )
-            return False, f"Could not verify position state for {symbol}: {exc}. Try again shortly."
+        # Determine position side from provided list or via API
+        pos_side: Optional[str] = None
+        if current_positions is not None:
+            for pos in current_positions:
+                if str(pos.get("symbol", "")).upper() == symbol.upper():
+                    side_raw = str(pos.get("side", "")).strip().upper()
+                    if side_raw in ("LONG", "SHORT"):
+                        pos_side = side_raw
+                    break
+        else:
+            try:
+                pos_side = self._position_side_for_symbol(symbol)
+            except Exception as exc:
+                logger.warning(
+                    "Position check failed for %s: %s — blocking as precaution.", symbol, exc
+                )
+                return False, f"Could not verify position state for {symbol}: {exc}. Try again shortly."
 
         if pos_side is None:
             return True, "OK"
@@ -465,18 +510,27 @@ class AlpacaTrader:
         cash_limit = float(self._state.get("cash_limit", INITIAL_CASH_LIMIT))
         try:
             acct = self._client.get_account()
-            # Effective buying power is the lesser of Alpaca's buying_power
-            # and our self-imposed hard limit.
-            available_bp = min(float(acct.buying_power), cash_limit)
+            # Crypto orders use cash (not marginable buying power).
+            # Equity orders can use the full buying_power (which may include margin).
+            is_crypto_order = alpaca_ticker.upper() in CRYPTO_SYMBOLS
+            raw_bp = float(acct.cash) if is_crypto_order else float(acct.buying_power)
+            available_bp = min(raw_bp, cash_limit)
         except Exception as exc:
             logger.error("Account fetch failed before order placement: %s", exc)
             return {"ok": False, "error": f"Account fetch failed: {exc}"}
 
         if available_bp < 1.0:
-            msg = (
-                f"Insufficient capital: available ${available_bp:.2f} "
-                f"(hard limit ${cash_limit:.2f})."
-            )
+            if alpaca_ticker.upper() in CRYPTO_SYMBOLS:
+                msg = (
+                    f"Insufficient crypto USD balance: available ${available_bp:.2f}. "
+                    "Alpaca crypto trading uses a separate USD wallet — check that your "
+                    "paper account has crypto enabled and USD funded in the Alpaca dashboard."
+                )
+            else:
+                msg = (
+                    f"Insufficient capital: available ${available_bp:.2f} "
+                    f"(hard limit ${cash_limit:.2f})."
+                )
             logger.error("[REJECTED] %s", msg)
             return {"ok": False, "error": msg}
 
@@ -494,55 +548,72 @@ class AlpacaTrader:
         # end up on the wrong side and the whole order is rejected.
         # We snap each leg to be at least MIN_BRACKET_BUFFER away from
         # current_price in the direction the strategy requires.
-        ref = current_price if current_price > 0 else entry
+        # (Skipped for crypto — broker rejects bracket orders; simple orders used.)
+        ref    = current_price if current_price > 0 else entry
         is_buy = side.upper() == "BUY"
-        if is_buy:
-            tp_min = round(ref + MIN_BRACKET_BUFFER, 2)
-            sl_max = round(ref - MIN_BRACKET_BUFFER, 2)
-            if take_profit < tp_min:
-                logger.warning(
-                    "[BRACKET CLAMP] BUY TP %.4f < ref+buf %.4f — clamping.",
-                    take_profit, tp_min,
-                )
-                take_profit = tp_min
-            if stop_loss > sl_max:
-                logger.warning(
-                    "[BRACKET CLAMP] BUY SL %.4f > ref-buf %.4f — clamping.",
-                    stop_loss, sl_max,
-                )
-                stop_loss = sl_max
-        else:  # SELL
-            tp_max = round(ref - MIN_BRACKET_BUFFER, 2)
-            sl_min = round(ref + MIN_BRACKET_BUFFER, 2)
-            if take_profit > tp_max:
-                logger.warning(
-                    "[BRACKET CLAMP] SELL TP %.4f > ref-buf %.4f — clamping.",
-                    take_profit, tp_max,
-                )
-                take_profit = tp_max
-            if stop_loss < sl_min:
-                logger.warning(
-                    "[BRACKET CLAMP] SELL SL %.4f < ref+buf %.4f — clamping.",
-                    stop_loss, sl_min,
-                )
-                stop_loss = sl_min
+        if alpaca_ticker.upper() not in CRYPTO_SYMBOLS:
+            if is_buy:
+                tp_min = round(ref + MIN_BRACKET_BUFFER, 2)
+                sl_max = round(ref - MIN_BRACKET_BUFFER, 2)
+                if take_profit < tp_min:
+                    logger.warning(
+                        "[BRACKET CLAMP] BUY TP %.4f < ref+buf %.4f — clamping.",
+                        take_profit, tp_min,
+                    )
+                    take_profit = tp_min
+                if stop_loss > sl_max:
+                    logger.warning(
+                        "[BRACKET CLAMP] BUY SL %.4f > ref-buf %.4f — clamping.",
+                        stop_loss, sl_max,
+                    )
+                    stop_loss = sl_max
+            else:  # SELL
+                tp_max = round(ref - MIN_BRACKET_BUFFER, 2)
+                sl_min = round(ref + MIN_BRACKET_BUFFER, 2)
+                if take_profit > tp_max:
+                    logger.warning(
+                        "[BRACKET CLAMP] SELL TP %.4f > ref-buf %.4f — clamping.",
+                        take_profit, tp_max,
+                    )
+                    take_profit = tp_max
+                if stop_loss < sl_min:
+                    logger.warning(
+                        "[BRACKET CLAMP] SELL SL %.4f < ref+buf %.4f — clamping.",
+                        stop_loss, sl_min,
+                    )
+                    stop_loss = sl_min
 
-        # ── Step 4: Submit bracket order (notional = $ amount) ────────────────
+        # ── Step 4: Submit order ────────────────────────────────────────────
         import json as _json
         import re as _re
 
         order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
+        is_crypto  = alpaca_ticker.upper() in CRYPTO_SYMBOLS
 
         def _build_req(use_qty: bool = False) -> MarketOrderRequest:
-            tif = TimeInForce.GTC if alpaca_ticker.upper() in CRYPTO_SYMBOLS else TimeInForce.DAY
-            common = dict(
-                symbol=alpaca_ticker,
-                side=order_side,
-                time_in_force=tif,
-                order_class=OrderClass.BRACKET,
-                take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
-                stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
-            )
+            # We use GTC for everything so that Stop-Loss and Take-Profit legs 
+            # survive overnight. (The market hours guard prevents entry market
+            # orders from queueing overnight).
+            tif = TimeInForce.GTC
+            if is_crypto:
+                # Alpaca does not support OTO/OCO/Bracket orders for crypto.
+                # Submit a simple market order; SL/TP are tracked in the journal
+                # but not enforced at the broker level for crypto positions.
+                common: dict = dict(
+                    symbol=alpaca_ticker,
+                    side=order_side,
+                    time_in_force=tif,
+                    order_class=OrderClass.SIMPLE,
+                )
+            else:
+                common = dict(
+                    symbol=alpaca_ticker,
+                    side=order_side,
+                    time_in_force=tif,
+                    order_class=OrderClass.BRACKET,
+                    take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+                    stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                )
             if use_qty:
                 ref_px = ref if ref > 0 else max(entry, 0.01)
                 qty = max(1, int(notional / ref_px))
@@ -568,6 +639,45 @@ class AlpacaTrader:
                     return {"ok": False, "error": f"Order submission error: {err_str}"}
                 else:
                     err_str = ""
+
+            # Alpaca rejects bracket/OTO/OCO for crypto — retry as simple order.
+            elif "does not support complex orders" in err_str.lower() or (
+                is_crypto and ("bracket" in err_str.lower() or "oto" in err_str.lower())
+            ):
+                logger.warning(
+                    "[CRYPTO SIMPLE RETRY] %s — broker rejected complex order; retrying as simple.",
+                    alpaca_ticker,
+                )
+                from alpaca.trading.requests import MarketOrderRequest as _MOR
+                tif = TimeInForce.GTC
+                simple_req: MarketOrderRequest
+                try:
+                    if notional >= 1.0:
+                        simple_req = _MOR(
+                            symbol=alpaca_ticker,
+                            side=order_side,
+                            time_in_force=tif,
+                            order_class=OrderClass.SIMPLE,
+                            notional=notional,
+                        )
+                    else:
+                        qty = max(1, int(notional / max(ref, 0.01)))
+                        simple_req = _MOR(
+                            symbol=alpaca_ticker,
+                            side=order_side,
+                            time_in_force=tif,
+                            order_class=OrderClass.SIMPLE,
+                            qty=qty,
+                        )
+                    order = self._client.submit_order(simple_req)
+                    err_str = ""
+                except Exception as simple_exc:
+                    err_str = str(simple_exc)
+                    logger.error(
+                        "[ORDER ERROR after simple retry] %s (%s): %s",
+                        ticker, alpaca_ticker, err_str,
+                    )
+                    return {"ok": False, "error": f"Order submission error: {err_str}"}
 
             # ── Alpaca bracket-leg rejection (error 42210000) ──────────────────
             # Alpaca validates SL/TP against its own fill quote (base_price), which
@@ -618,10 +728,14 @@ class AlpacaTrader:
                 time.sleep(2)
                 return {"ok": False, "error": f"Rate limited by Alpaca API: {err_str}"}
 
-            # Insufficient buying power
+            # Insufficient buying power / crypto USD wallet empty
             elif err_str and ("insufficient" in err_str.lower() or "buying power" in err_str.lower()):
                 logger.error("[BUYING POWER] %s → %s", ticker, err_str)
-                return {"ok": False, "error": f"Insufficient buying power: {err_str}"}
+                hint = (
+                    " (Alpaca crypto uses a separate USD wallet — verify it is funded "
+                    "in the Alpaca dashboard.)"
+                ) if alpaca_ticker.upper() in CRYPTO_SYMBOLS else ""
+                return {"ok": False, "error": f"Insufficient buying power: {err_str}{hint}"}
 
             elif err_str:
                 logger.error("[ORDER ERROR] %s (%s): %s", ticker, alpaca_ticker, err_str)
@@ -640,6 +754,7 @@ class AlpacaTrader:
             "stop_loss": float(stop_loss),
             "take_profit": float(take_profit),
             "confidence": float(confidence),
+            "notional": float(notional),
             "submitted_ts": time.time(),
             "settled": False,
             "metadata": metadata or {},
@@ -666,6 +781,250 @@ class AlpacaTrader:
             "risk_fraction":   _confidence_risk_fraction(confidence),
         }
 
+    # ── Place bot order (pre-computed sizing) ──────────────────────────────────
+
+    def place_bot_order(
+        self,
+        ticker: str,
+        side: str,
+        notional: float,
+        entry: float,
+        stop_loss: float,
+        take_profit: float,
+        current_positions: list[dict],
+        metadata: Optional[dict] = None,
+        order_type: str = "MARKET",
+    ) -> Dict[str, Any]:
+        """Entry point for autonomous engine orders."""
+        alpaca_ticker = self.map_ticker(ticker)
+
+        # 1. Validation check
+        pre_ok, pre_msg = validate_order(
+            side=side,
+            entry=entry,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            current_price=entry,
+            min_rr=MIN_RR_HARD,
+        )
+        if not pre_ok:
+            logger.warning("[BOT PRECHECK BLOCKED] %s/%s — %s", ticker, alpaca_ticker, pre_msg)
+            return {"ok": False, "error": pre_msg, "error_code": "preflight_conflict"}
+
+        if notional < 1.0:
+            return {"ok": False, "error": "Notional too small (< $1.00)"}
+
+        order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
+        is_crypto = alpaca_ticker.upper() in CRYPTO_SYMBOLS
+        is_limit = order_type.upper() == "LIMIT"
+        
+        # We strictly use GTC (Good Till Canceled) for all autonomous bot orders
+        # This ensures the stop-loss and take-profit legs survive overnight and 
+        # over the weekend to protect open swing/trend positions. 
+        # (The Market Hours guard in engine.py prevents entry market orders from queuing overnight)
+        tif = TimeInForce.GTC
+
+        # ── Scale-out: split into two bracket orders (half size each) ──────────
+        if config.SCALE_OUT_ENABLED and not is_crypto:
+            try:
+                qty = max(1, int(notional / max(entry, 0.01)))
+                half_qty = max(1, qty // 2)
+                risk_per_share = abs(entry - stop_loss)
+                tp1 = entry + (risk_per_share * config.SCALE_OUT_RR_RATIO) if order_side == OrderSide.BUY else entry - (risk_per_share * config.SCALE_OUT_RR_RATIO)
+                
+                # Build req1 (Half size, TP1)
+                req_class = LimitOrderRequest if is_limit else MarketOrderRequest
+                kwargs = {
+                    "symbol": alpaca_ticker, "side": order_side, "time_in_force": tif,
+                    "order_class": OrderClass.BRACKET,
+                    "take_profit": TakeProfitRequest(limit_price=round(tp1, 2)),
+                    "stop_loss": StopLossRequest(stop_price=round(stop_loss, 2)),
+                    "qty": half_qty
+                }
+                if is_limit: kwargs["limit_price"] = round(entry, 2)
+                req1 = req_class(**kwargs)
+                
+                # Build req2 (Remaining size, Original TP)
+                kwargs2 = kwargs.copy()
+                kwargs2["take_profit"] = TakeProfitRequest(limit_price=round(take_profit, 2))
+                kwargs2["qty"] = qty - half_qty
+                req2 = req_class(**kwargs2)
+                
+                order1 = self._client.submit_order(req1)
+                order2 = self._client.submit_order(req2)
+                
+                # We return the first order_id for tracking, journal both optionally or just order1.
+                return {"ok": True, "order_id": str(order1.id), "symbol": alpaca_ticker, "side": side.upper()}
+            except Exception as exc:
+                logger.error("Scale-out order failed: %s. Falling back to single order.", exc)
+                # Fall through to original logic
+
+        try:
+            if is_limit:
+                # Limit orders must use qty (LimitOrderRequest does not support notional)
+                qty = max(1, int(notional / max(entry, 0.01)))
+                if is_crypto:
+                    # Crypto: simple limit order (no bracket support)
+                    req = LimitOrderRequest(
+                        symbol=alpaca_ticker,
+                        side=order_side,
+                        time_in_force=tif,
+                        order_class=OrderClass.SIMPLE,
+                        limit_price=round(entry, 2),
+                        qty=qty,
+                    )
+                else:
+                    # Equity: bracket limit order with SL/TP
+                    req = LimitOrderRequest(
+                        symbol=alpaca_ticker,
+                        side=order_side,
+                        time_in_force=tif,
+                        order_class=OrderClass.BRACKET,
+                        limit_price=round(entry, 2),
+                        take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+                        stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                        qty=qty,
+                    )
+            elif is_crypto:
+                # Crypto: simple market order (no bracket support)
+                req = MarketOrderRequest(
+                    symbol=alpaca_ticker,
+                    side=order_side,
+                    time_in_force=tif,
+                    order_class=OrderClass.SIMPLE,
+                    notional=round(notional, 2),
+                )
+            else:
+                # Equity: bracket order with SL/TP
+                req = MarketOrderRequest(
+                    symbol=alpaca_ticker,
+                    side=order_side,
+                    time_in_force=tif,
+                    order_class=OrderClass.BRACKET,
+                    take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+                    stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                    notional=round(notional, 2),
+                )
+
+            order = self._client.submit_order(req)
+            order_id = str(order.id)
+
+            # Record in journal
+            meta = metadata or {}
+            self._state.setdefault("order_journal", {})[order_id] = {
+                "order_id": order_id,
+                "ticker": ticker,
+                "symbol": alpaca_ticker,
+                "side": side.upper(),
+                "entry": float(entry),
+                "stop_loss": float(stop_loss),
+                "take_profit": float(take_profit),
+                "confidence": float(meta.get("confidence", 0.0)),
+                "submitted_ts": time.time(),
+                "settled": False,
+                "metadata": meta,
+            }
+            self._save_state()
+
+            return {
+                "ok": True,
+                "order_id": order_id,
+                "symbol": alpaca_ticker,
+                "side": side.upper(),
+            }
+
+        except Exception as exc:
+            err_str = str(exc)
+            # Fractional/Complex bracket fallback
+            if not is_crypto and ("fractional" in err_str.lower() or "complex" in err_str.lower()):
+                try:
+                    qty = max(1, int(notional / max(entry, 0.01)))
+                    if is_limit:
+                        fb_req = LimitOrderRequest(
+                            symbol=alpaca_ticker,
+                            side=order_side,
+                            time_in_force=tif,
+                            order_class=OrderClass.BRACKET,
+                            limit_price=round(entry, 2),
+                            take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+                            stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                            qty=qty,
+                        )
+                    else:
+                        fb_req = MarketOrderRequest(
+                            symbol=alpaca_ticker,
+                            side=order_side,
+                            time_in_force=tif,
+                            order_class=OrderClass.BRACKET,
+                            take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+                            stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                            qty=qty,
+                        )
+                    fb_order = self._client.submit_order(fb_req)
+                    order_id = str(fb_order.id)
+                    
+                    meta = metadata or {}
+                    self._state.setdefault("order_journal", {})[order_id] = {
+                        "order_id": order_id,
+                        "ticker": ticker,
+                        "symbol": alpaca_ticker,
+                        "side": side.upper(),
+                        "entry": float(entry),
+                        "stop_loss": float(stop_loss),
+                        "take_profit": float(take_profit),
+                        "confidence": float(meta.get("confidence", 0.0)),
+                        "submitted_ts": time.time(),
+                        "settled": False,
+                        "metadata": meta,
+                    }
+                    self._save_state()
+                    return {"ok": True, "order_id": order_id, "symbol": alpaca_ticker, "side": side.upper()}
+                except Exception as fb_exc:
+                    logger.error("[BOT ORDER FAILED] %s fallback: %s", ticker, fb_exc)
+                    return {"ok": False, "error": str(fb_exc)}
+
+            logger.error("[BOT ORDER FAILED] %s: %s", ticker, err_str)
+            return {"ok": False, "error": err_str}
+
+
+    # ── Scale-out / Breakeven management ──────────────────────────────────────────
+
+    def move_stop_to_breakeven(self, symbol: str, entry_price: float) -> None:
+        """Move the stop-loss leg of an open bracket order to breakeven entry price.
+
+        Called by the engine after a scale-out TP1 fill reduces position size,
+        so the remaining position is risk-free.
+        """
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+        open_orders = self._client.get_orders(req)
+        for o in open_orders:
+            if str(o.order_type).lower() == "stop":
+                try:
+                    rep = ReplaceOrderRequest(stop_price=round(entry_price, 2))
+                    self._client.replace_order_by_id(o.id, rep)
+                except Exception as e:
+                    logger.error("Failed to move stop for %s: %s", symbol, e)
+
+    def update_position_exits(self, symbol: str, take_profit: float, stop_loss: float) -> None:
+        """Update the TP and SL legs of an active position."""
+        from alpaca.trading.requests import GetOrdersRequest, ReplaceOrderRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+        open_orders = self._client.get_orders(req)
+        for o in open_orders:
+            try:
+                o_type = o.order_type.value if hasattr(o.order_type, 'value') else str(o.order_type).lower()
+                if "stop" in o_type:
+                    rep = ReplaceOrderRequest(stop_price=round(stop_loss, 2))
+                    self._client.replace_order_by_id(str(o.id), rep)
+                    logger.info("Updated Stop Loss for %s to %.2f", symbol, stop_loss)
+                elif "limit" in o_type:
+                    rep = ReplaceOrderRequest(limit_price=round(take_profit, 2))
+                    self._client.replace_order_by_id(str(o.id), rep)
+                    logger.info("Updated Take Profit for %s to %.2f", symbol, take_profit)
+            except Exception as e:
+                logger.error("Failed to update exit leg for %s: %s", symbol, e)
+
     def _safe_status(self, obj: Any, fallback: str = "") -> str:
         """Return normalized lowercase status string from Alpaca object fields."""
         if obj is None:
@@ -674,7 +1033,7 @@ class AlpacaTrader:
         return str(raw).strip().lower()
 
     def _finalize_reason_from_order(self, order: Any, parent_side: str) -> tuple[bool, str, Optional[float]]:
-        """Infer whether trade worked and why from a terminal bracket order state."""
+        """Infer whether trade worked and why from a terminal bracket/simple order state."""
         status = self._safe_status(getattr(order, "status", ""))
 
         if status in {"rejected", "canceled", "cancelled", "expired"}:
@@ -700,7 +1059,15 @@ class AlpacaTrader:
                 return False, "stop_loss_hit", exit_px
 
         if status == "filled":
-            return True, "filled_without_leg_detail", None
+            # For simple market orders (e.g. crypto) there are no bracket legs.
+            # Extract fill price directly from the order object.
+            fill_px: Optional[float] = None
+            try:
+                if getattr(order, "filled_avg_price", None) is not None:
+                    fill_px = float(order.filled_avg_price)
+            except (TypeError, ValueError):
+                fill_px = None
+            return True, "filled_simple", fill_px
 
         return False, f"terminal_{status or 'unknown'}", None
 
@@ -763,12 +1130,37 @@ class AlpacaTrader:
             rec["worked"] = bool(worked)
             rec["closed_ts"] = time.time()
 
+            # Record dollar PnL
+            if pnl_pct != 0.0:
+                notional = float(rec.get("notional", 0.0))
+                if notional > 0:
+                    dollar_pnl = notional * (pnl_pct / 100.0)
+                    self.record_realised_pnl(dollar_pnl)
+
             sym = str(rec.get("symbol", ""))
             if sym and self._state.get("active_orders", {}).get(sym) == order_id:
                 del self._state["active_orders"][sym]
 
             processed += 1
             queued += 1
+
+        # ── Prune settled journals (memory-leak guard) ─────────────────────────
+        # Keep only the 200 most recently closed settled records to prevent
+        # unbounded growth of the order_journal dict.
+        settled: list[tuple[str, float]] = []
+        for key, rec in journals.items():
+            if rec.get("settled") and rec.get("closed_ts"):
+                settled.append((key, float(rec["closed_ts"])))
+        if len(settled) > 200:
+            settled.sort(key=lambda x: x[1], reverse=True)
+            keep = {k for k, _ in settled[:200]}
+            for key, _ in settled[200:]:
+                if key not in keep:
+                    del journals[key]
+            logger.info(
+                "Pruned %d settled journal entries (kept 200 most recent).",
+                len(settled) - 200,
+            )
 
         self._save_state()
         return {"ok": True, "processed": processed, "queued": queued}

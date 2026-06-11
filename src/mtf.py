@@ -1,7 +1,7 @@
 """Multi-Timeframe (MTF) Confluence Analysis
 ==========================================
 
-Cross-references 3m, 5m, 15m, and 30m timeframes with tiered weighting.
+Cross-references 1m, 3m, 5m, and 15m timeframes with tiered weighting.
 Higher timeframes are given more authority over the directional bias;
 1m is included solely as an entry-precision layer and casts no vote.
 
@@ -11,7 +11,6 @@ Timeframe roles
 - 3m  (weight 0.5) : light fast-signal context
 - 5m  (weight 1.0) : primary entry timeframe
 - 15m (weight 2.0) : key setup confirmation — carries most weight
-- 30m (weight 1.5) : broader trend bias / HTF context
 
 Voting
 ------
@@ -19,9 +18,9 @@ Each TF votes on the **market-structure trend** (bullish → BUY, bearish → SE
 Using FVG signal direction instead caused a systematic long-bias because
 find_setup() resolves any active bullish FVG as a BUY regardless of context.
 
-Consensus rules (total voting weight = 5.0)
+Consensus rules (total voting weight = 3.5)
 -------------------------------------------
-- LONG       : ≥60 % of total weight votes BUY  (≥3.0 pts)
+- LONG       : ≥60 % of total weight votes BUY  (≥2.1 pts)
 - SHORT      : ≥60 % of total weight votes SELL
 - LEAN_LONG  : BUY has plurality but < 60 %
 - LEAN_SHORT : SELL has plurality but < 60 %
@@ -30,9 +29,9 @@ Consensus rules (total voting weight = 5.0)
 Entry / Exit selection
 ----------------------
 - Entry  : most precise TF aligned with consensus that has an FVG setup
-           tried in order: 1m → 3m → 5m → 15m → 30m
+           tried in order: 1m → 3m → 5m → 15m
 - Stop   : taken from the same TF as entry
-- Target : preferred from a higher TF (15m → 30m → 5m → 3m)
+- Target : preferred from a higher TF (15m → 5m → 3m)
 
 A ⚡ flag is set per-TF when price is *currently* at/inside the FVG zone.
 """

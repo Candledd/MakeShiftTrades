@@ -1,65 +1,56 @@
 import logging
 import numpy as np
 import pandas as pd
-import yfinance as yf
+from datetime import datetime, timedelta, timezone
+
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+import config
 
 _log = logging.getLogger(__name__)
 
-# Maximum periods allowed by Yahoo Finance for each interval
-_MAX_PERIOD_DAYS: dict[str, int] = {
-    "1m":  7,
-    "2m":  60,
-    "3m":  7,   # synthetic — resampled from 1m
-    "5m":  60,
-    "15m": 60,
-    "30m": 60,
-    "60m": 730,
-    "1h":  730,
-    "90m": 60,
-    "1d":  3650,
-    "5d":  3650,
-    "1wk": 3650,
-    "1mo": 3650,
-    "3mo": 3650,
+# ── Global Alpaca data clients ────────────────────────────────────────────
+_stock_client = StockHistoricalDataClient(
+    api_key=config.ALPACA_API_KEY,
+    secret_key=config.ALPACA_SECRET_KEY,
+)
+_crypto_client = CryptoHistoricalDataClient()
+
+# ── Interval → Alpaca TimeFrame mapping ──────────────────────────────────
+_INTERVAL_TO_TIMEFRAME: dict[str, TimeFrame] = {
+    "1m":  TimeFrame(amount=1, unit=TimeFrameUnit.Minute),
+    "15m": TimeFrame(amount=15, unit=TimeFrameUnit.Minute),
+    "1h":  TimeFrame(amount=1, unit=TimeFrameUnit.Hour),
+    "4h":  TimeFrame(amount=4, unit=TimeFrameUnit.Hour),
+    "1d":  TimeFrame(amount=1, unit=TimeFrameUnit.Day),
 }
 
-# Intervals that don't exist in yfinance and must be built by resampling.
-# Maps synthetic_interval → (base_interval, pandas_resample_rule)
-_RESAMPLE_MAP: dict[str, tuple[str, str]] = {
-    "3m": ("1m", "3min"),
-}
-
-_PERIOD_DAYS: dict[str, int] = {
-    "1d":   1,
+# ── Period → days delta ──────────────────────────────────────────────────
+_PERIOD_TO_DAYS: dict[str, int] = {
     "5d":   5,
-    "7d":   7,
     "1mo":  30,
     "3mo":  90,
-    "6mo":  180,
-    "1y":   365,
-    "2y":   730,
-    "5y":   1825,
-    "10y":  3650,
-    "max":  99999,
 }
 
-_DAY_TO_PERIOD: list[tuple[int, str]] = sorted(
-    [(v, k) for k, v in _PERIOD_DAYS.items()], key=lambda t: t[0]
-)
+_CRYPTO_SUFFIXES: tuple[str, ...] = ("-USD", "-USDT", "-USDC")
 
 
-def _cap_period(period: str, interval: str) -> str:
-    """Return a capped period string that Yahoo Finance will accept."""
-    max_days = _MAX_PERIOD_DAYS.get(interval, 3650)
-    req_days = _PERIOD_DAYS.get(period, 365)
-    if req_days <= max_days:
-        return period
-    # Find the largest period that fits within max_days
-    result = "1d"
-    for days, p in _DAY_TO_PERIOD:
-        if days <= max_days:
-            result = p
-    return result
+def _is_crypto(ticker: str) -> bool:
+    """Return ``True`` if *ticker* is a crypto symbol (ends in ``-USD`` etc.)."""
+    return ticker.upper().endswith(_CRYPTO_SUFFIXES)
+
+
+def _alpaca_symbol(ticker: str) -> str:
+    """Convert a ticker to Alpaca's expected symbol format.
+
+    Crypto symbols (e.g. ``BTC-USD``) use ``BTC/USD`` with a slash separator.
+    Equity/commodity symbols are passed through unchanged.
+    """
+    if _is_crypto(ticker):
+        return ticker.replace("-", "/")
+    return ticker
 
 
 def _fix_flat_ohlcv(df: pd.DataFrame, ticker: str = "", interval: str = "") -> pd.DataFrame:
@@ -96,62 +87,87 @@ def _fix_flat_ohlcv(df: pd.DataFrame, ticker: str = "", interval: str = "") -> p
     return df
 
 
-def _fetch_raw(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    """Download and normalise a single yfinance-supported interval.
-
-    Uses Ticker.history() instead of yf.download() to guarantee a flat column
-    structure regardless of yfinance version. yf.download() with a single
-    crypto ticker can return a MultiIndex where level-0 is the ticker symbol
-    (not the price field), causing all OHLC columns to resolve to the same
-    closing price and rendering flat doji candles with no wicks.
-    """
-    period = _cap_period(period, interval)
-    df: pd.DataFrame = yf.Ticker(ticker).history(
-        period=period,
-        interval=interval,
-        auto_adjust=True,
-    )
-    if df.empty:
-        raise ValueError(f"No data returned for ticker '{ticker}'.")
-
-    # history() returns flat columns; defensive MultiIndex guard for edge cases.
-    # yfinance can return MultiIndex with either (field, ticker) or (ticker, field)
-    # ordering depending on the interval/version, so check which level holds the
-    # OHLCV field names rather than blindly taking level 0.
-    if isinstance(df.columns, pd.MultiIndex):
-        _ohlcv = {"Open", "High", "Low", "Close", "Volume"}
-        _lvl0 = set(df.columns.get_level_values(0))
-        if _ohlcv.issubset(_lvl0):
-            df.columns = df.columns.get_level_values(0)
-        else:
-            df.columns = df.columns.get_level_values(1)
-
-    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-    df.index = pd.to_datetime(df.index)
-    return _fix_flat_ohlcv(df, ticker, interval)
-
-
-def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Resample an OHLCV DataFrame to *rule* (e.g. '3min')."""
-    resampled = df.resample(rule).agg(
-        {"Open": "first", "High": "max", "Low": "min",
-         "Close": "last", "Volume": "sum"}
-    ).dropna()
-    return resampled
-
 
 def fetch_ohlcv(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-    """Download OHLCV bars, handling synthetic intervals via resampling.
+    """Download OHLCV bars using the Alpaca market data API.
 
-    • Automatically caps the period to what Yahoo Finance allows.
-    • '3m' is synthesised by downloading 1m data and resampling.
+    Parameters
+    ----------
+    ticker : str
+        Symbol to fetch (e.g. ``"SPY"``, ``"BTC-USD"``, ``"GLD"``).
+    period : str
+        Lookback period. Supported: ``"5d"``, ``"1mo"``, ``"3mo"``.
+        Unrecognised periods default to 90 days.
+    interval : str
+        Bar interval. Supported: ``"1m"``, ``"15m"``, ``"1h"``, ``"4h"``, ``"1d"``.
 
-    Returns a DataFrame with columns Open, High, Low, Close, Volume and a
-    DatetimeIndex.  Raises ValueError if no data is returned.
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``Open``, ``High``, ``Low``, ``Close``, ``Volume`` with a
+        timezone-aware ``DatetimeIndex``.
+
+    Raises
+    ------
+    ValueError
+        If *interval* is unsupported or no data is returned.
     """
-    if interval in _RESAMPLE_MAP:
-        base_interval, rule = _RESAMPLE_MAP[interval]
-        df_raw = _fetch_raw(ticker, period, base_interval)
-        return _resample_ohlcv(df_raw, rule)
+    if interval not in _INTERVAL_TO_TIMEFRAME:
+        raise ValueError(
+            f"Unsupported interval '{interval}'. "
+            f"Supported intervals: {list(_INTERVAL_TO_TIMEFRAME.keys())}"
+        )
 
-    return _fetch_raw(ticker, period, interval)
+    timeframe = _INTERVAL_TO_TIMEFRAME[interval]
+
+    # Calculate start datetime from the human-readable period string.
+    days = _PERIOD_TO_DAYS.get(period, 90)
+    start = datetime.now(timezone.utc) - timedelta(days=days)
+
+    symbol = _alpaca_symbol(ticker)
+
+    # ── Route to the correct request/client ────────────────────────────────
+    if _is_crypto(ticker):
+        req = CryptoBarsRequest(
+            symbol_or_symbols=[symbol],
+            timeframe=timeframe,
+            start=start,
+        )
+        bars = _crypto_client.get_crypto_bars(req)
+    else:
+        feed = getattr(config, "ALPACA_DATA_FEED", "iex")
+        req = StockBarsRequest(
+            symbol_or_symbols=[symbol],
+            timeframe=timeframe,
+            start=start,
+            feed=feed,
+        )
+        bars = _stock_client.get_stock_bars(req)
+
+    df = bars.df
+
+    if df.empty:
+        raise ValueError(f"No data returned for ticker '{ticker}' from Alpaca.")
+
+    # ── Flatten the index if it's a MultiIndex ─────────────────────────────
+    # Alpaca returns a (symbol, timestamp) MultiIndex for all bar types when
+    # the request result contains multiple symbols; for single-symbol requests
+    # it may still produce a MultiIndex (notably for crypto).  Drop the symbol
+    # level so we get a flat DatetimeIndex.
+    if isinstance(df.index, pd.MultiIndex):
+        df = df.reset_index(level="symbol", drop=True)
+
+    # ── Rename lowercase Alpaca columns → uppercase strategy schema ────────
+    # Alpaca columns: open, high, low, close, volume, trade_count, vwap, …
+    rename = {"open": "Open", "high": "High", "low": "Low",
+              "close": "Close", "volume": "Volume"}
+    df = df.rename(columns=rename)
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
+
+    # ── Normalise index ────────────────────────────────────────────────────
+    df.index = pd.to_datetime(df.index)
+
+    # ── Safety net: synthesise OHLC from close if bars are abnormally flat ─
+    df = _fix_flat_ohlcv(df, ticker, interval)
+
+    return df

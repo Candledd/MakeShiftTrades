@@ -42,4 +42,7 @@ MEMORY.MD
 trades_state.json
 trades_state_backup.json
 trade_feedback.jsonl
-
+.serena
+.opencode
+.orchestration_plan.md
+session-ses_14d8.md

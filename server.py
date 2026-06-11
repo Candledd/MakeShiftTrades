@@ -9,6 +9,8 @@ import logging
 import threading
 import time
 import traceback
+import collections
+import config
 
 import pandas as pd
 import plotly.io as pio
@@ -17,7 +19,30 @@ from flask import Flask, Response, jsonify, render_template, request
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot_overnight_telemetry.log", encoding="utf-8")
+    ]
 )
+
+class DequeLogHandler(logging.Handler):
+    def __init__(self, maxlen=200):
+        super().__init__()
+        self.logs = collections.deque(maxlen=maxlen)
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+            "%Y-%m-%d %H:%M:%S"
+        ))
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.logs.append(msg)
+        except Exception:
+            self.handleError(record)
+
+deque_handler = DequeLogHandler()
+logging.getLogger().addHandler(deque_handler)
 
 from charts.data import fetch_ohlcv
 from charts.renderer import build_chart
@@ -37,6 +62,11 @@ from charts.indicators.levels import (
 )
 
 app = Flask(__name__)
+
+# Suppress routine Flask HTTP GET logs to keep the console clean
+import logging as _logging
+_werkzeug_log = _logging.getLogger('werkzeug')
+_werkzeug_log.setLevel(_logging.ERROR)
 
 TICKERS = ["NQ=F", "ES=F", "YM=F", "RTY=F", "SPY", "QQQ", "AAPL", "TSLA", "GC=F", "CL=F", "BTC-USD", "ETH-USD"]
 
@@ -275,7 +305,13 @@ def api_signal():
     """
     Returns the combined SMC + ML trade signal for the requested ticker.
 
-    Query params: ticker, interval, period
+    Pipeline
+    --------
+      1. SMCStrategy.analyze()  — strict SMC setup (sweep + CHoCH + FVG + OB)
+      2. SMCStrategy.find_setup() — pending levels for UI display
+      3. ML.evaluate_signal()   — Veto Filter on the SMC signal
+      4. Combine → final signal + confidence + alignment
+
     Response JSON keys:
       ok, ticker, signal, confidence, alignment,
       ml  : { signal, confidence, probabilities, trained },
@@ -293,31 +329,27 @@ def api_signal():
         from src.strategy import SMCStrategy
         strategy     = SMCStrategy(ticker, interval=interval, period=period)
         strict_sig   = strategy.analyze(df)
-        smc_signal   = strict_sig or strategy.find_setup(df)
-        price_at_zone = strict_sig is not None
+        pending_sig  = strategy.find_setup(df)
+        smc_signal   = strict_sig or pending_sig
 
         smc_dir = smc_signal.direction if smc_signal else None
 
-        # ── Enhanced SMC scoring (0-6) ──────────────────────────────
-        smc_score = 0
-        if smc_signal:
+        # ── SMC score (0–6) mapped from strategy confidence ─────────
+        strategy_conf = smc_signal.confidence if smc_signal else 0.0
+        if strategy_conf >= 80:
+            smc_score = 6
+        elif strategy_conf >= 60:
+            smc_score = 5
+        elif strategy_conf >= 50:
+            smc_score = 4
+        elif strategy_conf >= 40:
+            smc_score = 3
+        elif strategy_conf >= 25:
             smc_score = 2
-            if smc_signal.raw_data.get("has_ob"):
-                smc_score += 1
-            if smc_signal.raw_data.get("has_engulf"):
-                smc_score += 1
-            if price_at_zone:
-                smc_score += 1
-            try:
-                eq = detect_equilibrium(df)
-                if eq:
-                    cur = float(df["Close"].iloc[-1])
-                    if smc_dir == "BUY"  and cur < eq["eq"]:
-                        smc_score += 1
-                    elif smc_dir == "SELL" and cur > eq["eq"]:
-                        smc_score += 1
-            except Exception:
-                pass
+        elif strategy_conf >= 1:
+            smc_score = 1
+        else:
+            smc_score = 0
 
         smc_block = {
             "signal":        smc_dir,
@@ -325,43 +357,49 @@ def api_signal():
             "stop_loss":     smc_signal.stop_loss   if smc_signal else None,
             "take_profit":   smc_signal.take_profit if smc_signal else None,
             "risk_reward":   smc_signal.risk_reward if smc_signal else None,
-            "confidence":    smc_signal.confidence  if smc_signal else None,
+            "confidence":    strategy_conf,
             "reason":        smc_signal.reason      if smc_signal else None,
             "smc_score":     smc_score,
-            "price_at_zone": price_at_zone,
+            "price_at_zone": strict_sig is not None,
         }
 
-        # ── ML signal ───────────────────────────────────────────────
-        ml_result = _get_ml_model().predict(df)
-        ml_dir    = ml_result["signal"]
-        ml_conf   = ml_result["confidence"]
+        # ── Combine SMC + ML Veto Filter ────────────────────────────
+        if strict_sig is not None and smc_dir:
+            # We have a real SMC setup — run the ML Veto Filter
+            ml_eval = _get_ml_model().evaluate_signal(df, smc_dir)
 
-        # ── Combine SMC + ML ─────────────────────────────────────────
-        score_boost = smc_score / 6
+            if ml_eval["veto"]:
+                # ML says this setup is unlikely to succeed — block the trade
+                final_signal = "HOLD"
+                final_conf   = strategy_conf * 0.5  # mark confidence down
+                alignment    = "disagreement"
+            else:
+                # ML confirms the setup — blend confidences
+                final_signal = smc_dir
+                final_conf   = min(95.0, (strategy_conf + ml_eval["confidence"]) / 2)
+                alignment    = "aligned"
 
-        if price_at_zone and smc_dir and smc_dir == ml_dir:
-            final_signal = smc_dir
-            final_conf   = min(100.0, ml_conf + 25.0 * score_boost)
-            alignment    = "aligned"
-        elif price_at_zone and smc_dir:
-            final_signal = smc_dir
-            final_conf   = min(100.0, ml_conf + 12.0 * score_boost)
-            alignment    = "smc_only"
-        elif smc_dir and smc_dir == ml_dir:
-            final_signal = smc_dir
-            final_conf   = ml_conf * 0.90
-            alignment    = "aligned"
-        elif smc_dir and ml_dir != "HOLD" and smc_dir != ml_dir:
-            final_signal = ml_dir
-            final_conf   = ml_conf * 0.70
-            alignment    = "disagreement"
-        elif smc_dir:
-            final_signal = smc_dir
-            final_conf   = min(100.0, ml_conf * 0.80 + 5.0 * score_boost)
-            alignment    = "smc_only"
+            # Prepare ml block for frontend display
+            ml_result = {
+                "signal":        final_signal,
+                "confidence":    round(ml_eval["confidence"], 1),
+                "probabilities": ml_eval["details"],
+                "trained":       ml_eval["trained"],
+                "training":      ml_eval["training"],
+            }
+
+        elif pending_sig is not None:
+            # No strict SMC setup, but there's a pending setup for UI
+            final_signal = "HOLD"
+            final_conf   = strategy_conf * 0.6  # low — pending only
+            alignment    = "pending"
+            ml_result    = _get_ml_model().predict(df)
+
         else:
-            final_signal = ml_dir
-            final_conf   = ml_conf
+            # No SMC signal at all — fall back to ML standalone
+            ml_result = _get_ml_model().predict(df)
+            final_signal = ml_result["signal"]
+            final_conf   = ml_result["confidence"]
             alignment    = "ml_only"
 
         return jsonify({
@@ -671,6 +709,188 @@ def api_paper_execute():
     else:
         http_code = 422
     return jsonify(result), http_code
+
+
+@app.route("/api/paper/test-order", methods=["POST"])
+def api_paper_test_order():
+    """Place a small test market order at the current price — no is_enabled guard.
+
+    Submits a SIMPLE GTC market order directly at the requested notional so the
+    amount is exactly what you asked for (typically $10 for a smoke-test).
+    Does NOT run through the full bracket/sizing pipeline.
+
+    Body JSON (all optional):
+      ticker  : str   — yfinance symbol (default "BTC-USD")
+      side    : str   — "BUY" or "SELL"  (default "BUY")
+      notional: float — dollar amount    (default 10.0)
+    """
+    from alpaca.trading.enums import OrderClass as _OC, OrderSide as _OS, TimeInForce as _TIF
+    from alpaca.trading.requests import MarketOrderRequest as _MOR
+
+    trader = _get_alpaca()
+    if trader is None:
+        return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
+
+    data     = request.get_json(silent=True) or {}
+    ticker   = str(data.get("ticker",   "BTC-USD")).strip().upper()
+    side     = str(data.get("side",     "BUY")).strip().upper()
+    notional = float(data.get("notional", 10.0))
+
+    if side not in ("BUY", "SELL"):
+        return jsonify({"ok": False, "error": "side must be BUY or SELL"}), 400
+    if notional < 1.0:
+        return jsonify({"ok": False, "error": "notional must be >= 1.0"}), 400
+
+    alpaca_symbol = trader.map_ticker(ticker)
+    order_side    = _OS.BUY if side == "BUY" else _OS.SELL
+
+    try:
+        order = trader._client.submit_order(_MOR(
+            symbol=alpaca_symbol,
+            side=order_side,
+            time_in_force=_TIF.GTC,
+            order_class=_OC.SIMPLE,
+            notional=notional,
+        ))
+        return jsonify({
+            "ok":       True,
+            "test":     True,
+            "order_id": str(order.id),
+            "symbol":   alpaca_symbol,
+            "side":     side,
+            "notional": notional,
+            "status":   str(order.status.value) if hasattr(order.status, "value") else str(order.status),
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 422
+
+
+# ── Autonomous Trading Bot Control APIs ──────────────────────────────────────────
+
+_bot_engine = None
+_bot_thread = None
+_bot_lock = threading.Lock()
+
+@app.route("/api/bot/status")
+def api_bot_status():
+    global _bot_engine
+    is_running = _bot_engine is not None and _bot_engine.running
+    
+    status = {
+        "ok": True,
+        "running": is_running,
+        "uptime": int(time.time() - _bot_engine.start_time) if (_bot_engine is not None and is_running) else 0,
+        "cycle_count": _bot_engine.cycle_count if _bot_engine else 0,
+        "signals_today": _bot_engine.signals_today if _bot_engine else 0,
+        "orders_today": _bot_engine.orders_today if _bot_engine else 0,
+        "ai_regime": _bot_engine.ai_tuner.current_regimes if (_bot_engine and hasattr(_bot_engine, "ai_tuner")) else {"Equity": "Unknown", "Crypto": "Unknown", "Commodity": "Unknown"},
+        "config": {
+            "dry_run": config.DRY_RUN,
+            "max_risk_pct": config.MAX_RISK_PCT,
+            "max_positions": config.MAX_POSITIONS,
+            "scan_interval": config.SCAN_INTERVAL,
+        },
+        "instruments": []
+    }
+    
+    if _bot_engine:
+        for inst in _bot_engine.instruments:
+            status["instruments"].append({
+                "ticker": inst["ticker"],
+                "strategy": inst["strategy"].name if hasattr(inst["strategy"], "name") else str(inst["strategy"]),
+                "timeframe": inst["strategy"].timeframe if hasattr(inst["strategy"], "timeframe") else "?",
+                "last_scan": int(inst["last_scan"]) if inst["last_scan"] > 0 else 0,
+                "interval_seconds": inst["interval_seconds"],
+            })
+            
+    return jsonify(status)
+
+@app.route("/api/bot/toggle", methods=["POST"])
+def api_bot_toggle():
+    global _bot_engine, _bot_thread
+    data = request.get_json(silent=True) or {}
+    enable = bool(data.get("enabled", False))
+    
+    with _bot_lock:
+        is_running = _bot_engine is not None and _bot_engine.running
+        
+        if enable:
+            if is_running:
+                return jsonify({"ok": True, "running": True, "message": "Bot is already running."})
+            
+            from src.engine import TradingEngine
+            try:
+                _bot_engine = TradingEngine()
+                _bot_thread = threading.Thread(target=_bot_engine.run, daemon=True)
+                _bot_thread.start()
+                return jsonify({"ok": True, "running": True, "message": "Bot engine started."})
+            except Exception as exc:
+                return jsonify({"ok": False, "error": f"Failed to start bot engine: {exc}"}), 500
+        else:
+            if not is_running or _bot_engine is None:
+                return jsonify({"ok": True, "running": False, "message": "Bot is already stopped."})
+            
+            _bot_engine.stop()
+            # Wait briefly for thread shutdown
+            for _ in range(10):
+                if _bot_engine is None or not _bot_engine.running:
+                    break
+                time.sleep(0.1)
+            return jsonify({"ok": True, "running": False, "message": "Bot engine stopped."})
+
+@app.route("/api/bot/configure", methods=["POST"])
+def api_bot_configure():
+    global _bot_engine
+    data = request.get_json(silent=True) or {}
+    
+    try:
+        if "dry_run" in data:
+            config.DRY_RUN = bool(data["dry_run"])
+        if "max_risk_pct" in data:
+            config.MAX_RISK_PCT = float(data["max_risk_pct"])
+        if "max_positions" in data:
+            config.MAX_POSITIONS = int(data["max_positions"])
+        if "scan_interval" in data:
+            config.SCAN_INTERVAL = float(data["scan_interval"])
+            
+        # Dynamically sync config changes to the active engine instances if running
+        if _bot_engine:
+            if _bot_engine.risk_manager:
+                _bot_engine.risk_manager.max_risk_pct = config.MAX_RISK_PCT
+                _bot_engine.risk_manager.max_positions = config.MAX_POSITIONS
+            
+        return jsonify({
+            "ok": True,
+            "message": "Configuration updated successfully.",
+            "config": {
+                "dry_run": config.DRY_RUN,
+                "max_risk_pct": config.MAX_RISK_PCT,
+                "max_positions": config.MAX_POSITIONS,
+                "scan_interval": config.SCAN_INTERVAL,
+            }
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Failed to update config: {exc}"}), 400
+
+@app.route("/api/bot/logs")
+def api_bot_logs():
+    # Return last 100 log statements from the deque handler
+    return jsonify({
+        "ok": True,
+        "logs": list(deque_handler.logs)
+    })
+
+@app.route("/api/bot/broker")
+def api_bot_broker():
+    trader = _get_alpaca()
+    if not trader:
+        return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
+    
+    return jsonify({
+        "ok": True,
+        "positions": trader.get_positions(),
+        "orders": trader.get_active_orders().get("orders", [])
+    })
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

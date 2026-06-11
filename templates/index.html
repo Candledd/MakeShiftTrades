@@ -14,14 +14,19 @@
     <div class="logo">MakeShiftTrades</div>
     <div class="header-sub">ICT / SMC Indicator Suite</div>
   </div>
+  
+  <div class="nav-tabs">
+    <button id="tab-btn-chart" class="nav-tab active" onclick="switchTab('chart')">Chart Suite</button>
+    <button id="tab-btn-bot" class="nav-tab" onclick="switchTab('bot')">Autonomous Bot</button>
+  </div>
+
   <div class="live-dot" title="Live data"></div>
-  <button id="hdr-ar" class="hdr-ar-btn active" onclick="toggleAR()">Auto: On</button>
 </header>
 
-<div class="layout">
+<div class="layout" id="view-chart">
 
   <!-- ── Sidebar ── -->
-  <aside class="sidebar">
+  <aside class="sidebar glass-panel" style="border: none;">
     <h3>Tickers</h3>
     {% for t in tickers %}
     <button class="ticker-btn" data-ticker="{{ t }}" onclick="selectTicker('{{ t }}')">{{ t }}</button>
@@ -52,7 +57,7 @@
   </main>
 
   <!-- ── Indicator panel ── -->
-  <aside class="ind-panel">
+  <aside class="ind-panel glass-panel" style="border: none;">
 
     <!-- ── AI Signal + MTF card ── -->
     <div id="signal-card">
@@ -274,6 +279,174 @@
       ICT/SMC indicators ported from TradingView Pine scripts.<br>Data via Yahoo Finance.
     </div>
   </aside>
+</div>
+
+<!-- ── Autonomous Bot Dashboard Tab ── -->
+<div class="layout" id="view-bot" style="display: none; grid-template-columns: 1fr; padding: 20px; overflow-y: auto; gap: 20px;">
+  <div class="bot-dashboard-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; width: 100%; max-width: 1400px; margin: 0 auto;">
+    
+    <!-- Column 1: Controls & Stats -->
+    <div class="bot-card glass-panel">
+      <h3 style="margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 8px; color: var(--text);">Engine Control</h3>
+      
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
+        <span style="font-weight: 600;">Autonomous Loop</span>
+        <button id="bot-toggle-btn" class="pt-execute-btn" style="width: auto; padding: 8px 16px; margin: 0; background: var(--bull); color: white;" onclick="toggleBotEngine()">Start Bot</button>
+      </div>
+
+      <div class="pt-acct-info" style="display: block; margin-top: 15px;">
+        <div class="pt-acct-row" style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 6px 0;">
+          <span>Status</span>
+          <span id="bot-status-val" style="color: var(--bear); font-weight: 700;">STOPPED</span>
+        </div>
+        <div class="pt-acct-row" style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 6px 0;">
+          <span>Market Regime (AI)</span>
+          <span id="bot-regime-val" style="color: var(--accent); font-weight: 700;">—</span>
+        </div>
+        <div class="pt-acct-row" style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 6px 0;">
+          <span>Uptime</span>
+          <span id="bot-uptime-val">—</span>
+        </div>
+        <div class="pt-acct-row" style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 6px 0;">
+          <span>Scan Cycles</span>
+          <span id="bot-cycles-val">—</span>
+        </div>
+        <div class="pt-acct-row" style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 6px 0;">
+          <span>Signals Today</span>
+          <span id="bot-signals-val">—</span>
+        </div>
+        <div class="pt-acct-row" style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 6px 0;">
+          <span>Orders Today</span>
+          <span id="bot-orders-val">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Column 2: Parameters Configuration -->
+    <div class="bot-card glass-panel">
+      <h3 style="margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 8px; color: var(--text);">Global Parameters</h3>
+      
+      <div style="display: flex; flex-direction: column; gap: 15px;">
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <span title="In Dry Run mode, the bot scans and logs signals, but does not place actual broker orders.">Dry Run Mode</span>
+          <label class="pt-toggle-switch" style="position: relative; display: inline-block; width: 40px; height: 20px;">
+            <input type="checkbox" id="bot-dry-run-toggle" style="opacity: 0; width: 0; height: 0;" onchange="updateBotConfig()">
+            <span class="pt-toggle-slider" style="position: absolute; cursor: pointer; inset: 0; background-color: #ccc; transition: .4s; border-radius: 20px;"></span>
+          </label>
+        </div>
+
+        <div>
+          <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px;">
+            <span>Max Risk Per Trade</span>
+            <span id="bot-risk-label" style="font-weight: 600;">1.0%</span>
+          </div>
+          <input type="range" id="bot-risk-slider" min="0.1" max="10.0" step="0.1" value="1.0" style="width: 100%; accent-color: var(--accent);" oninput="updateBotConfigLabels()" onchange="updateBotConfig()">
+        </div>
+
+        <div>
+          <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px;">
+            <span>Max Open Positions</span>
+            <span id="bot-max-positions-label" style="font-weight: 600;">5</span>
+          </div>
+          <input type="range" id="bot-max-positions-slider" min="1" max="10" step="1" value="5" style="width: 100%; accent-color: var(--accent);" oninput="updateBotConfigLabels()" onchange="updateBotConfig()">
+        </div>
+
+        <div>
+          <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px;">
+            <span>Scan Interval</span>
+            <span id="bot-scan-interval-label" style="font-weight: 600;">60s</span>
+          </div>
+          <input type="range" id="bot-scan-interval-slider" min="5" max="300" step="5" value="60" style="width: 100%; accent-color: var(--accent);" oninput="updateBotConfigLabels()" onchange="updateBotConfig()">
+        </div>
+      </div>
+    </div>
+
+    <!-- Column 3: Active Instruments -->
+    <div class="bot-card glass-panel">
+      <h3 style="margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 8px; color: var(--text);">Monitored Instruments</h3>
+      
+      <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
+        <thead>
+          <tr style="color: var(--muted); border-bottom: 1px solid var(--border);">
+            <th style="padding: 6px 0;">Asset</th>
+            <th style="padding: 6px 0;">Strategy</th>
+            <th style="padding: 6px 0;">Timeframe</th>
+            <th style="padding: 6px 0; text-align: right;">Last Scan</th>
+          </tr>
+        </thead>
+        <tbody id="bot-instruments-table">
+          <tr>
+            <td colspan="4" style="text-align: center; color: var(--muted); padding: 20px 0;">Start the bot to view instruments</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+
+  <!-- Row 2: Live Logger Console -->
+  <div class="bot-card glass-panel" style="max-width: 1400px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; height: 350px;">
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
+      <h3 style="color: var(--text); margin: 0; display: flex; align-items: center; gap: 8px;">
+        Execution Logs
+        <span id="bot-pulse" class="bot-pulse-dot" style="display: none;"></span>
+      </h3>
+      <button class="ar-btn" style="padding: 4px 10px; font-size: 11px; margin-left: auto; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; color: var(--muted); transition: all 0.2s;" onmouseover="this.style.color='#fff'; this.style.borderColor='var(--accent)';" onmouseout="this.style.color='var(--muted)'; this.style.borderColor='var(--border)';" onclick="clearConsoleLog()">Clear Console</button>
+    </div>
+    <div id="bot-log-console" class="bot-log-console">
+      <!-- Log output -->
+    </div>
+  </div>
+
+  <!-- Row 3: Live Broker State -->
+  <div class="bot-dashboard-grid" style="display: grid; grid-template-columns: 1fr; gap: 20px; width: 100%; max-width: 1400px; margin: 0 auto;">
+    
+    <!-- Active Positions -->
+    <div class="bot-card glass-panel" style="display: flex; flex-direction: column; min-height: 250px;">
+      <h3 style="margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 8px; color: var(--text);">Live Positions</h3>
+      <div style="flex: 1; overflow-y: auto;">
+        <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
+          <thead>
+            <tr style="color: var(--muted); border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <th style="padding: 8px 4px;">Symbol</th>
+              <th style="padding: 8px 4px;">Side</th>
+              <th style="padding: 8px 4px; text-align: right;">Qty</th>
+              <th style="padding: 8px 4px; text-align: right;">Entry</th>
+              <th style="padding: 8px 4px; text-align: right;">PnL</th>
+            </tr>
+          </thead>
+          <tbody id="bot-positions-table">
+            <tr>
+              <td colspan="5" style="text-align: center; color: var(--muted); padding: 20px 0;">No active positions</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Pending Orders -->
+    <div class="bot-card glass-panel" style="display: flex; flex-direction: column; min-height: 250px;">
+      <h3 style="margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 8px; color: var(--text);">Pending Orders (SL/TP)</h3>
+      <div style="flex: 1; overflow-y: auto;">
+        <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
+          <thead>
+            <tr style="color: var(--muted); border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <th style="padding: 8px 4px;">Symbol</th>
+              <th style="padding: 8px 4px;">Side</th>
+              <th style="padding: 8px 4px;">Type</th>
+              <th style="padding: 8px 4px; text-align: right;">Price</th>
+            </tr>
+          </thead>
+          <tbody id="bot-orders-table">
+            <tr>
+              <td colspan="4" style="text-align: center; color: var(--muted); padding: 20px 0;">No pending orders</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
 </div>
 
 <script src="{{ url_for('static', filename='js/index.js') }}"></script>
