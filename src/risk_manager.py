@@ -2,6 +2,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 from src.strategies import StrategySignal
+from src.database import get_realized_pnl, get_strategy_expectancy
+import config as _cfg
 
 RISK_ON_ASSETS = {"SPY", "QQQ", "IWM", "DIA"}
 CRYPTO_ASSETS = {"BTC-USD", "ETH-USD", "BTCUSD", "ETHUSD"}
@@ -37,7 +39,6 @@ class RiskManager:
         self.peak_equity = 0.0
 
         # ── Tiered risk overrides (loaded from config) ────────────────
-        import config as _cfg
         self._tier_equity_pct = getattr(_cfg, 'RISK_TIER_EQUITY_PCT', 0.0025)
         self._tier_crypto_pct = getattr(_cfg, 'RISK_TIER_CRYPTO_PCT', 0.0050)
         self._tier_commodity_pct = getattr(_cfg, 'RISK_TIER_COMMODITY_PCT', 0.0035)
@@ -65,6 +66,22 @@ class RiskManager:
     def _resolve_ticker(self, raw: str) -> str:
         """Resolve a ticker to its canonical (Alpaca) form."""
         return self._ticker_map.get(raw, raw)
+
+    def _resolve_symbol_set(self, items: list, key_field: str = "symbol") -> set[str]:
+        """Build a set of symbols from *items*, including resolved aliases."""
+        symbols: set[str] = set()
+        for item in items:
+            sym = item.get(key_field, "")
+            if not sym:
+                continue
+            symbols.add(sym)
+            if sym in self._ticker_map:
+                symbols.add(self._ticker_map[sym])
+            if sym in self._ticker_map.values():
+                for k, v in self._ticker_map.items():
+                    if v == sym:
+                        symbols.add(k)
+        return symbols
 
     def _get_tier_risk_pct(self, signal: StrategySignal) -> float:
         """Return the risk-per-trade percentage for the signal's asset class.
@@ -173,13 +190,12 @@ class RiskManager:
         tier_name = self._get_tier_name(signal)
 
         # 5. Sector-Specific AI Multiplier
-        import config
         if signal.strategy_name == "mean_reversion":
-            ai_mult = getattr(config, 'AI_RISK_MULTIPLIER_EQUITY', 1.0)
+            ai_mult = getattr(_cfg, 'AI_RISK_MULTIPLIER_EQUITY', 1.0)
         elif signal.strategy_name == "momentum_breakout":
-            ai_mult = getattr(config, 'AI_RISK_MULTIPLIER_CRYPTO', 1.0)
+            ai_mult = getattr(_cfg, 'AI_RISK_MULTIPLIER_CRYPTO', 1.0)
         elif signal.strategy_name == "trend_following":
-            ai_mult = getattr(config, 'AI_RISK_MULTIPLIER_COMMODITY', 1.0)
+            ai_mult = getattr(_cfg, 'AI_RISK_MULTIPLIER_COMMODITY', 1.0)
         else:
             ai_mult = 1.0
 
@@ -229,7 +245,12 @@ class RiskManager:
     # ── Correlation Filter ─────────────────────────────────────────────
 
     def check_correlation_filter(
-        self, signal: StrategySignal, current_positions: list[dict], active_orders: list[dict] = None
+        self,
+        signal: StrategySignal,
+        current_positions: list[dict],
+        active_orders: list[dict] = None,
+        position_state: dict = None,
+        account_equity: float = 0.0,
     ) -> tuple[bool, str]:
         """Enforce correlation and diversification rules.
 
@@ -239,35 +260,76 @@ class RiskManager:
         *active_orders* format::
             [{'symbol': str, 'status': str}, ...]
 
+        *position_state*::
+            {ticker: {'entry_price': float, 'stop_loss': float, 'qty': float}, ...}
+
         Returns ``(True, "OK")`` if the signal passes, or ``(False, reason)``
         if it is blocked.
         """
         if active_orders is None:
             active_orders = []
+        if position_state is None:
+            position_state = {}
 
-        # ── Build set of existing position symbols (including mapped aliases) ──
-        position_symbols: set[str] = set()
+        # ── Portfolio Heat Check — Total Open Risk ──────────────────────────
+        # Include both open positions AND pending orders in the risk calculation
+        total_risk_usd = 0.0
+        heat_symbols: set[str] = set()
         for pos in current_positions:
             sym = pos.get("symbol", "")
-            position_symbols.add(sym)
-            if sym in self._ticker_map:
-                position_symbols.add(self._ticker_map[sym])
-            if sym in self._ticker_map.values():
-                for k, v in self._ticker_map.items():
-                    if v == sym:
-                        position_symbols.add(k)
-
-        # ── Build set of symbols that have pending unfilled orders ──
-        pending_order_symbols: set[str] = set()
+            if sym:
+                heat_symbols.add(sym)
         for o in active_orders:
             sym = o.get("symbol", "")
-            pending_order_symbols.add(sym)
-            if sym in self._ticker_map:
-                pending_order_symbols.add(self._ticker_map[sym])
-            if sym in self._ticker_map.values():
-                for k, v in self._ticker_map.items():
-                    if v == sym:
-                        pending_order_symbols.add(k)
+            if sym:
+                heat_symbols.add(sym)
+        for sym in heat_symbols:
+            state = position_state.get(sym)
+            if state is not None:
+                risk_usd = abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0)
+                total_risk_usd += risk_usd
+
+        if account_equity > 0 and total_risk_usd > 0:
+            max_portfolio_risk_pct = _cfg.MAX_OPEN_PORTFOLIO_RISK_PCT
+            if total_risk_usd / account_equity > max_portfolio_risk_pct:
+                return (
+                    False,
+                    f"Portfolio heat limit: total open risk ${total_risk_usd:.2f} "
+                    f"({total_risk_usd/account_equity:.2%}) exceeds "
+                    f"{max_portfolio_risk_pct:.2%}",
+                )
+
+        # ── Cluster Risk Check ──────────────────────────────────────────────
+        def _cluster_risk(cluster_set: set[str]) -> float:
+            risk = 0.0
+            for sym in heat_symbols:
+                if sym in cluster_set or self._ticker_map.get(sym, sym) in cluster_set:
+                    state = position_state.get(sym)
+                    if state is not None:
+                        risk += abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0)
+            return risk
+
+        if account_equity > 0:
+            max_cluster_pct = _cfg.MAX_CLUSTER_RISK_PCT
+            for cluster_name, cluster_set in [
+                ("risk-on", RISK_ON_ASSETS),
+                ("crypto", CRYPTO_ASSETS),
+                ("commodity", COMMODITY_ASSETS),
+            ]:
+                cluster_risk = _cluster_risk(cluster_set)
+                if cluster_risk > 0 and (cluster_risk / account_equity) > max_cluster_pct:
+                    return (
+                        False,
+                        f"Cluster heat limit ({cluster_name}): cluster risk "
+                        f"${cluster_risk:.2f} ({cluster_risk/account_equity:.2%}) "
+                        f"exceeds {max_cluster_pct:.2%}",
+                    )
+
+        # ── Build set of existing position symbols (including mapped aliases) ──
+        position_symbols = self._resolve_symbol_set(current_positions)
+
+        # ── Build set of symbols that have pending unfilled orders ──
+        pending_order_symbols = self._resolve_symbol_set(active_orders)
 
         # 1A. Max 1 active position per symbol
         if signal.ticker in position_symbols:
@@ -384,6 +446,15 @@ class RiskManager:
         if not spread_ok:
             return (False, spread_reason)
 
+        # 7. Strategy expectancy gate — reject trades with negative expected value
+        ev_r, sample_size = get_strategy_expectancy(signal.strategy_name, signal.direction)
+        if sample_size >= _cfg.MIN_EXPECTANCY_SAMPLES and ev_r < _cfg.MIN_EXPECTANCY_R:
+            return (
+                False,
+                f"Expectancy gate: ev_r={ev_r:.3f} (sample={sample_size}) "
+                f"below {_cfg.MIN_EXPECTANCY_R} threshold",
+            )
+
         return (True, "OK")
 
     # ── Full Approval Pipeline ─────────────────────────────────────────
@@ -394,6 +465,7 @@ class RiskManager:
         account_equity: float,
         current_positions: list[dict],
         active_orders: list[dict] = None,
+        position_state: dict = None,
     ) -> tuple[bool, float, str]:
         """Run the full risk pipeline: validate → correlation → size.
 
@@ -401,6 +473,27 @@ class RiskManager:
         """
         if active_orders is None:
             active_orders = []
+        if position_state is None:
+            position_state = {}
+
+        # 0. P&L Kill Switch — daily and weekly loss limits
+        daily_pnl = get_realized_pnl(1)
+        if daily_pnl < account_equity * -abs(_cfg.MAX_DAILY_LOSS_PCT):
+            self.logger.info(
+                "Signal rejected: %s %s — Daily loss limit hit ($%.2f < $%.2f)",
+                signal.direction, signal.ticker,
+                daily_pnl, account_equity * -abs(_cfg.MAX_DAILY_LOSS_PCT),
+            )
+            return (False, 0.0, f"Daily P&L kill switch: ${daily_pnl:.2f} exceeds limit")
+
+        weekly_pnl = get_realized_pnl(7)
+        if weekly_pnl < account_equity * -abs(_cfg.MAX_WEEKLY_LOSS_PCT):
+            self.logger.info(
+                "Signal rejected: %s %s — Weekly loss limit hit ($%.2f < $%.2f)",
+                signal.direction, signal.ticker,
+                weekly_pnl, account_equity * -abs(_cfg.MAX_WEEKLY_LOSS_PCT),
+            )
+            return (False, 0.0, f"Weekly P&L kill switch: ${weekly_pnl:.2f} exceeds limit")
 
         # 1. Validate signal
         valid, reason = self.validate_signal(signal)
@@ -409,7 +502,10 @@ class RiskManager:
             return (False, 0.0, reason)
 
         # 2. Correlation filter (now includes double-dip guard against active orders)
-        allowed, reason = self.check_correlation_filter(signal, current_positions, active_orders)
+        allowed, reason = self.check_correlation_filter(
+            signal, current_positions, active_orders,
+            position_state=position_state, account_equity=account_equity,
+        )
         if not allowed:
             self.logger.info("Signal rejected: %s %s — %s", signal.direction, signal.ticker, reason)
             return (False, 0.0, reason)

@@ -25,6 +25,7 @@ from src.strategies.trend_pullback import TrendPullbackStrategy
 from src.risk_manager import RiskManager
 from src.alpaca_trader import AlpacaTrader
 from src.macro_filter import SEVERITY_FLATTEN_ALL, SEVERITY_NORMAL, SEVERITY_NO_NEW_ENTRIES
+from src.database import init_db, log_trade
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ class TradingEngine:
     # ──────────────────────────────────────────────────────────────────────
 
     def __init__(self) -> None:
+
+        init_db()
 
         # Alpaca trader (soft-fail so the engine can still report status)
         try:
@@ -376,7 +379,8 @@ class TradingEngine:
                     return
 
         approved, notional, reason = self.risk_manager.approve(
-            signal, equity, positions, active_orders
+            signal, equity, positions, active_orders,
+            position_state=self._position_state,
         )
 
         # --- SIGNAL TELEMETRY DUMP ---
@@ -460,9 +464,16 @@ class TradingEngine:
 
         if result.get("ok"):
             self.orders_today += 1
-            self._position_state.setdefault(alpaca_ticker, {})['confidence'] = signal.confidence
-            self._position_state[alpaca_ticker]['take_profit'] = signal.take_profit
-            self._position_state[alpaca_ticker]['stop_loss'] = signal.stop_loss
+            st = self._position_state.setdefault(alpaca_ticker, {})
+            st['confidence'] = signal.confidence
+            st['take_profit'] = signal.take_profit
+            st['stop_loss'] = signal.stop_loss
+            st['atr_at_entry'] = signal.atr
+            st['entry_price'] = signal.entry
+            st['notional'] = notional
+            st['qty'] = notional / signal.entry
+            st['side'] = signal.direction
+            st['strategy'] = signal.strategy_name
             logger.info(
                 "[ORDER PLACED] %s %s $%.2f | ID: %s",
                 signal.direction,
@@ -477,10 +488,6 @@ class TradingEngine:
                 signal.ticker,
                 result.get("error"),
             )
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Position management (trailing stop / time stop)
-    # ──────────────────────────────────────────────────────────────────────
 
     # ──────────────────────────────────────────────────────────────────────
     # TTL sweeper — cancel stale entry orders
@@ -509,6 +516,54 @@ class TradingEngine:
                     except Exception as e:
                         logger.error("Failed to parse submitted_at %s: %s", sub_str, e)
 
+    def _close_and_log_position(
+        self, sym: str, state: dict, current_price: float,
+        unrealized_pl: float, exit_reason: str, qty_pct: Optional[str] = None,
+    ) -> None:
+        """Calculate MFE/MAE, log trade, and close position (full or partial).
+
+        Parameters
+        ----------
+        qty_pct : str, optional
+            Percentage of the position to close (e.g. ``"50"``). When
+            ``None`` the entire position is closed.
+        """
+        side = state.get('side', 'long')
+        _entry = state.get('entry_price', current_price)
+
+        # MFE / MAE
+        if side == 'long':
+            _mfe = state.get('highest', current_price) - _entry
+            _mae = _entry - state.get('lowest', current_price)
+        else:
+            _mfe = _entry - state.get('lowest', current_price)
+            _mae = state.get('highest', current_price) - _entry
+
+        # Close position first (so we don't log a phantom trade on failure)
+        try:
+            if qty_pct is not None:
+                self.trader._client.close_position(sym, percentage=qty_pct)
+            else:
+                self.trader._client.close_position(sym)
+        except Exception as e:
+            logger.error("Failed to close position %s: %s", sym, e)
+
+        # Log the trade
+        log_trade(
+            symbol=sym,
+            strategy=state.get('strategy', 'unknown'),
+            direction=side,
+            entry_price=_entry,
+            exit_price=current_price,
+            stop_loss=state.get('stop_loss', 0),
+            qty=state.get('qty', 0),
+            pnl=unrealized_pl,
+            mfe=_mfe,
+            mae=_mae,
+            hold_hours=(time.time() - state.get('open_ts', time.time())) / 3600.0,
+            exit_reason=exit_reason,
+        )
+
     def _manage_positions(self) -> None:
         """Monitor open positions and close based on trailing/stop loss or time stop."""
         if self.trader is None:
@@ -531,10 +586,11 @@ class TradingEngine:
 
             # Initialise tracking entry if new position or if missing tracking fields
             if sym not in self._position_state or 'open_ts' not in self._position_state[sym]:
+                entry = self._position_state.get(sym, {}).get('entry_price', current_price)
                 self._position_state.setdefault(sym, {}).update({
                     "open_ts": time.time(),
-                    "highest": current_price,
-                    "lowest": current_price,
+                    "highest": max(current_price, entry),
+                    "lowest": min(current_price, entry),
                 })
 
             state = self._position_state[sym]
@@ -545,8 +601,36 @@ class TradingEngine:
             if current_price < state['lowest']:
                 state['lowest'] = current_price
 
+            # ── Synthetic Crypto Bracket Management ────────────────────
+            is_crypto = sym in ("BTCUSD", "ETHUSD", "BCHUSD", "LTCUSD", "UNIUSD", "LINKUSD")
+            if is_crypto:
+                # 1. Synthetic Stop Loss
+                if 'stop_loss' in state:
+                    if (side == 'long' and current_price <= state['stop_loss']) or \
+                       (side == 'short' and current_price >= state['stop_loss']):
+                        logger.info("Closing crypto position %s due to synthetic stop loss", sym)
+                        self._close_and_log_position(sym, state, current_price, unrealized_pl, 'synthetic_sl')
+                        del self._position_state[sym]
+                        continue
+
+                # 2. Synthetic Take Profit (Partial 1.5R or full if TP is set)
+                # Alpaca allows closing a percentage of the position. We'll close 50% for scale-out.
+                if 'take_profit' in state and not state.get('tp_filled', False):
+                    if (side == 'long' and current_price >= state['take_profit']) or \
+                       (side == 'short' and current_price <= state['take_profit']):
+                        logger.info("Taking partial profit on %s due to synthetic take-profit limit", sym)
+                        # Halve the remaining qty in state before calling helper
+                        state['qty'] = state.get('qty', 0) * 0.5
+                        self._close_and_log_position(sym, state, current_price, unrealized_pl * 0.5, 'synthetic_tp', qty_pct="50")
+                        state['tp_filled'] = True
+                        # We keep tracking it as a runner now.
+
             # ── Trailing Stop ──────────────────────────────────────────
-            trail_dist = current_price * 0.01 * config.TRAILING_STOP_PCT
+            # Use ATR-based trailing if available, else fallback to percentage
+            if 'atr_at_entry' in state and state['atr_at_entry'] > 0:
+                trail_dist = state['atr_at_entry'] * config.TRAILING_STOP_PCT
+            else:
+                trail_dist = current_price * 0.01 * config.TRAILING_STOP_PCT
 
             should_close = False
             if side == 'long' and current_price < state['highest'] - trail_dist:
@@ -556,10 +640,7 @@ class TradingEngine:
 
             if should_close:
                 logger.info("Closing %s due to trailing stop", sym)
-                try:
-                    self.trader._client.close_position(sym)
-                except Exception as e:
-                    logger.error("Failed to close position %s: %s", sym, e)
+                self._close_and_log_position(sym, state, current_price, unrealized_pl, 'trailing_stop')
                 del self._position_state[sym]
                 continue
 
@@ -578,10 +659,7 @@ class TradingEngine:
                     "Closing %s due to time stop (%.1f hours)",
                     sym, time_stop_hours,
                 )
-                try:
-                    self.trader._client.close_position(sym)
-                except Exception as e:
-                    logger.error("Failed to close position %s: %s", sym, e)
+                self._close_and_log_position(sym, state, current_price, unrealized_pl, 'time_stop')
                 del self._position_state[sym]
 
     # ──────────────────────────────────────────────────────────────────────
@@ -645,3 +723,4 @@ class TradingEngine:
             )
         except Exception as exc:
             logger.warning("Status log failed: %s", exc)
+

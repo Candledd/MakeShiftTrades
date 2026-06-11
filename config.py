@@ -39,6 +39,36 @@ try:
 except ValueError:
     raise ValueError("MAX_POSITIONS must be a valid integer")
 
+try:
+    MAX_OPEN_PORTFOLIO_RISK_PCT = float(os.getenv("MAX_OPEN_PORTFOLIO_RISK_PCT", "0.02"))
+except ValueError:
+    raise ValueError("MAX_OPEN_PORTFOLIO_RISK_PCT must be a valid number")
+
+try:
+    MAX_CLUSTER_RISK_PCT = float(os.getenv("MAX_CLUSTER_RISK_PCT", "0.01"))
+except ValueError:
+    raise ValueError("MAX_CLUSTER_RISK_PCT must be a valid number")
+
+try:
+    MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", "-0.015"))
+except ValueError:
+    raise ValueError("MAX_DAILY_LOSS_PCT must be a valid number")
+
+try:
+    MAX_WEEKLY_LOSS_PCT = float(os.getenv("MAX_WEEKLY_LOSS_PCT", "-0.04"))
+except ValueError:
+    raise ValueError("MAX_WEEKLY_LOSS_PCT must be a valid number")
+
+try:
+    MIN_EXPECTANCY_R = float(os.getenv("MIN_EXPECTANCY_R", "0.05"))
+except ValueError:
+    raise ValueError("MIN_EXPECTANCY_R must be a valid number")
+
+try:
+    MIN_EXPECTANCY_SAMPLES = int(os.getenv("MIN_EXPECTANCY_SAMPLES", "5"))
+except ValueError:
+    raise ValueError("MIN_EXPECTANCY_SAMPLES must be a valid integer")
+
 # ── Tiered Risk Per Asset Class ──────────────────────────────────────────────
 # These override MAX_RISK_PCT when a ticker matches the corresponding asset set.
 try:
@@ -409,6 +439,12 @@ if TIME_STOP_COMMODITY_HOURS < 1:
 for _name, _val, _label in [
     ("SCAN_INTERVAL", SCAN_INTERVAL, ">= 1"),
     ("MAX_POSITIONS", MAX_POSITIONS, ">= 1"),
+    ("MAX_OPEN_PORTFOLIO_RISK_PCT", MAX_OPEN_PORTFOLIO_RISK_PCT, "> 0"),
+    ("MAX_CLUSTER_RISK_PCT", MAX_CLUSTER_RISK_PCT, "> 0"),
+    ("MAX_DAILY_LOSS_PCT", MAX_DAILY_LOSS_PCT, "<= 0"),
+    ("MAX_WEEKLY_LOSS_PCT", MAX_WEEKLY_LOSS_PCT, "<= 0"),
+    ("MIN_EXPECTANCY_R", MIN_EXPECTANCY_R, "> 0"),
+    ("MIN_EXPECTANCY_SAMPLES", MIN_EXPECTANCY_SAMPLES, ">= 1"),
     ("MAX_RISK_PCT", MAX_RISK_PCT, "> 0"),
     ("MAX_POSITION_PCT", MAX_POSITION_PCT, "> 0"),
     ("MAX_NOTIONAL", MAX_NOTIONAL, "> 0"),
@@ -451,6 +487,8 @@ for _name, _val, _label in [
     elif _label.startswith(">= 2") and _val < 2:
         raise ValueError(f"{_name} must be {_label}, got {_val}")
     elif _label.startswith("> 0") and _val <= 0:
+        raise ValueError(f"{_name} must be {_label}, got {_val}")
+    elif _label.startswith("<= 0") and _val > 0:
         raise ValueError(f"{_name} must be {_label}, got {_val}")
 
 # ── Pre-Approved Regime Profiles (bounded, no arbitrary AI rewriting) ─────────
