@@ -225,7 +225,7 @@ except ValueError:
     raise ValueError("MR_STOCH_RSI_OVERBOUGHT must be a valid number")
 
 try:
-    MR_VOL_SPIKE_MULT = float(os.getenv("MR_VOL_SPIKE_MULT", "1.1"))
+    MR_VOL_SPIKE_MULT = float(os.getenv("MR_VOL_SPIKE_MULT", "1.0"))
 except ValueError:
     raise ValueError("MR_VOL_SPIKE_MULT must be a valid number")
 

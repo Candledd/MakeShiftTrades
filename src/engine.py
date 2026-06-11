@@ -492,13 +492,22 @@ class TradingEngine:
         if not res.get("ok"): return
         now = datetime.now(timezone.utc)
         for o in res.get("orders", []):
-            if getattr(o, "parent_id", None) is None:
-                sub = getattr(o, "submitted_at", None)
-                if sub:
-                    age_h = (now - sub).total_seconds() / 3600.0
-                    if age_h > config.ORDER_TTL_HOURS:
-                        logger.info("[TTL SWEEP] Canceling stale entry order %s (Age: %.1fh)", o.get('symbol', 'unknown'), age_h)
-                        self.trader.cancel_order(str(o.get('id', '')))
+            if o.get("parent_id") is None:
+                sub_str = o.get("submitted_at")
+                if sub_str:
+                    try:
+                        # Handle potential 'Z' or offset formats
+                        if sub_str.endswith('Z'):
+                            sub_str = sub_str[:-1] + '+00:00'
+                        sub = datetime.fromisoformat(sub_str)
+                        if sub.tzinfo is None:
+                            sub = sub.replace(tzinfo=timezone.utc)
+                        age_h = (now - sub).total_seconds() / 3600.0
+                        if age_h > config.ORDER_TTL_HOURS:
+                            logger.info("[TTL SWEEP] Canceling stale entry order %s (Age: %.1fh)", o.get('symbol', 'unknown'), age_h)
+                            self.trader.cancel_order(str(o.get('id', '')))
+                    except Exception as e:
+                        logger.error("Failed to parse submitted_at %s: %s", sub_str, e)
 
     def _manage_positions(self) -> None:
         """Monitor open positions and close based on trailing/stop loss or time stop."""
@@ -520,13 +529,13 @@ class TradingEngine:
             market_value = pos['market_value']
             side = pos['side']
 
-            # Initialise tracking entry if new position
-            if sym not in self._position_state:
-                self._position_state[sym] = {
+            # Initialise tracking entry if new position or if missing tracking fields
+            if sym not in self._position_state or 'open_ts' not in self._position_state[sym]:
+                self._position_state.setdefault(sym, {}).update({
                     "open_ts": time.time(),
                     "highest": current_price,
                     "lowest": current_price,
-                }
+                })
 
             state = self._position_state[sym]
 

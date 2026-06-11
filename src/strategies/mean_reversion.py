@@ -157,11 +157,12 @@ class MeanReversionStrategy(BaseStrategy):
             return None
 
         # -- Entry / Exit -----------------------------------------------
+        # Even for limit orders, we use the current_close (the reclaim price) 
+        # to avoid missing the trade if price continues reverting.
+        entry = current_close
         if config.USE_LIMIT_ORDERS_MR:
-            entry = current_lower if direction == "BUY" else current_upper
             order_type = "LIMIT"
         else:
-            entry = current_close
             order_type = "MARKET"
 
         stop_loss = self.compute_stop_loss(entry, direction, atr=atr_val)

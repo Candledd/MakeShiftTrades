@@ -206,9 +206,9 @@ class MomentumBreakoutStrategy(BaseStrategy):
                 1 for i in range(-config.MB_FALSE_BREAKOUT_BARS, 0)
                 if close.iloc[i] > upper_channel.iloc[i]
             )
-            if bars_above < 1:
+            if bars_above < 2:
                 logger.debug(
-                    "%s %s: false breakout (only %d bars above channel)",
+                    "%s %s: false breakout (only %d bars above channel, require 2+)",
                     self.name, ticker, bars_above,
                 )
                 return None
@@ -217,9 +217,9 @@ class MomentumBreakoutStrategy(BaseStrategy):
                 1 for i in range(-config.MB_FALSE_BREAKOUT_BARS, 0)
                 if close.iloc[i] < lower_channel.iloc[i]
             )
-            if bars_below < 1:
+            if bars_below < 2:
                 logger.debug(
-                    "%s %s: false breakout (only %d bars below channel)",
+                    "%s %s: false breakout (only %d bars below channel, require 2+)",
                     self.name, ticker, bars_below,
                 )
                 return None

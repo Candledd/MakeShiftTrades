@@ -299,6 +299,7 @@ class AlpacaTrader:
                     "stop_price":       float(o.stop_price) if getattr(o, "stop_price", None) else None,
                     "filled_avg_price": float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else None,
                     "order_class":      str(o.order_class.value) if hasattr(o.order_class, "value") else str(o.order_class),
+                    "parent_id":        str(o.parent_id) if getattr(o, "parent_id", None) else None,
                 })
             return {"ok": True, "orders": result}
         except Exception as exc:
