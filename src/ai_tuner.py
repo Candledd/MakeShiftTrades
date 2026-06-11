@@ -1,13 +1,17 @@
 """MakeShiftTrades — Market Regime AI Tuner
 Analyzes recent benchmark data across Equity, Crypto, and Commodities
-to classify sector-specific market regimes and dynamically update strategy parameters.
+to classify sector-specific market regimes and select pre-approved parameter profiles.
+
+The AI does NOT directly rewrite arbitrary config values. Instead it selects
+from pre-approved parameter sets (REGIME_PROFILES in config.py) based on
+quantifiable market features (SMA trend direction, ATR volatility).
 """
 
 import logging
 import time
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 
 from charts.data import fetch_ohlcv
 import config
@@ -15,8 +19,16 @@ import config
 logger = logging.getLogger(__name__)
 
 class AITuner:
-    """Sector-Specific Parameter-Tuning AI Agent."""
-    
+    """Sector-Specific Regime Classifier with Bounded Profile Selection.
+
+    Analyzes quantifiable market features (trend direction via 20/50 SMA crossover,
+    volatility via 14-period ATR% of close) to select a pre-approved regime profile
+    for each sector from config.REGIME_PROFILES.
+
+    The AI does NOT directly rewrite arbitrary strategy parameters or risk limits.
+    All config changes are bounded to the pre-approved profiles defined in config.py.
+    """
+
     def __init__(self):
         self.current_regimes = {
             "Equity": "Unknown",
@@ -26,8 +38,13 @@ class AITuner:
         self.last_tuned_time = 0
         self.tune_interval = 3600 * 4  # Retune every 4 hours
 
-    def _analyze_asset_regime(self, ticker: str, volatile_threshold: float) -> Tuple[str, float]:
-        """Analyzes a specific asset to determine its regime and current ATR."""
+    def _analyze_asset_regime(self, ticker: str, volatile_threshold: float) -> Tuple[Optional[str], float]:
+        """Analyzes a specific asset to determine its regime and current ATR.
+
+        Uses quantifiable market features:
+        - Trend direction: 20/50 SMA crossover
+        - Volatility: 14-period ATR as % of close
+        """
         try:
             df = fetch_ohlcv(ticker, period="6mo", interval="1d")
             if df is None or len(df) < 50:
@@ -66,74 +83,70 @@ class AITuner:
             logger.warning("AI Tuner failed to analyze %s: %s", ticker, exc)
             return None, 0.0
 
+    def _apply_regime_profile(self, sector: str, regime_name: str) -> Dict[str, Any]:
+        """Apply the pre-approved profile parameters for a given sector and regime.
+
+        Looks up the profile in config.REGIME_PROFILES and applies only the
+        pre-approved parameter overrides — no arbitrary config rewriting.
+        Returns the applied parameter dict.
+        """
+        sector_profiles = config.REGIME_PROFILES.get(sector, {})
+        profile = sector_profiles.get(regime_name, {})
+        if not profile:
+            logger.warning("No profile found for %s / %s", sector, regime_name)
+            return {}
+
+        with config.config_lock:
+            for key, val in profile.items():
+                setattr(config, key, val)
+
+        logger.debug("Applied %s profile '%s': %s", sector, regime_name, profile)
+        return profile
+
     def tune_parameters(self) -> Dict[str, Any]:
-        """Analyze sectors, determine regimes, and apply new configs."""
+        """Analyze sectors using quantifiable market features and select pre-approved profiles.
+
+        For each sector:
+        1. Analyze market features (SMA trend + ATR % volatility)
+        2. Select a regime from the pre-approved set in config.REGIME_PROFILES
+        3. Apply only the bounded parameters from that profile
+
+        Does NOT directly modify arbitrary strategy indicators or risk limits.
+        Returns a dict of sector -> {regime, profile, atr_pct}.
+        """
         now = time.time()
         if now - self.last_tuned_time < self.tune_interval and "Unknown" not in self.current_regimes.values():
-            return {} 
+            return {}
 
-        updates = {}
+        results = {}
         log_msgs = []
 
         # 1. EQUITY SECTOR (SPY) -> impacts Mean Reversion
         eq_regime, eq_atr = self._analyze_asset_regime("SPY", volatile_threshold=1.5)
         if eq_regime:
             self.current_regimes["Equity"] = eq_regime
-            if eq_regime == "Bullish Calm":
-                updates["AI_RISK_MULTIPLIER_EQUITY"] = 1.0
-                updates["MR_RSI_OVERSOLD"] = 40.0
-            elif eq_regime == "Bullish Volatile":
-                updates["AI_RISK_MULTIPLIER_EQUITY"] = 0.8
-                updates["MR_RSI_OVERSOLD"] = 35.0
-            elif eq_regime == "Bearish Chop":
-                updates["AI_RISK_MULTIPLIER_EQUITY"] = 0.5
-                updates["MR_RSI_OVERSOLD"] = 25.0
-            else: # Bearish Volatile
-                updates["AI_RISK_MULTIPLIER_EQUITY"] = 0.5
-                updates["MR_RSI_OVERSOLD"] = 20.0
+            profile = self._apply_regime_profile("Equity", eq_regime)
+            results["Equity"] = {"regime": eq_regime, "profile": profile, "atr_pct": eq_atr}
             log_msgs.append(f"EQ: {eq_regime}")
 
         # 2. CRYPTO SECTOR (BTC-USD) -> impacts Momentum Breakout
         cr_regime, cr_atr = self._analyze_asset_regime("BTC-USD", volatile_threshold=4.0)
         if cr_regime:
             self.current_regimes["Crypto"] = cr_regime
-            if cr_regime == "Bullish Calm":
-                updates["AI_RISK_MULTIPLIER_CRYPTO"] = 1.0
-                updates["MB_ADX_THRESHOLD"] = 20.0
-            elif cr_regime == "Bullish Volatile":
-                updates["AI_RISK_MULTIPLIER_CRYPTO"] = 0.8
-                updates["MB_ADX_THRESHOLD"] = 25.0
-            elif cr_regime == "Bearish Chop":
-                updates["AI_RISK_MULTIPLIER_CRYPTO"] = 0.5
-                updates["MB_ADX_THRESHOLD"] = 25.0
-            else: # Bearish Volatile
-                updates["AI_RISK_MULTIPLIER_CRYPTO"] = 0.5
-                updates["MB_ADX_THRESHOLD"] = 30.0
+            profile = self._apply_regime_profile("Crypto", cr_regime)
+            results["Crypto"] = {"regime": cr_regime, "profile": profile, "atr_pct": cr_atr}
             log_msgs.append(f"CRYPTO: {cr_regime}")
 
         # 3. COMMODITY SECTOR (GLD) -> impacts Trend Following
         co_regime, co_atr = self._analyze_asset_regime("GLD", volatile_threshold=1.5)
         if co_regime:
             self.current_regimes["Commodity"] = co_regime
-            if co_regime == "Bullish Calm":
-                updates["AI_RISK_MULTIPLIER_COMMODITY"] = 1.0
-                updates["TF_EMA_FAST"] = 20
-            elif co_regime == "Bullish Volatile":
-                updates["AI_RISK_MULTIPLIER_COMMODITY"] = 0.8
-                updates["TF_EMA_FAST"] = 20
-            elif co_regime == "Bearish Chop":
-                updates["AI_RISK_MULTIPLIER_COMMODITY"] = 0.5
-                updates["TF_EMA_FAST"] = 15
-            else: # Bearish Volatile
-                updates["AI_RISK_MULTIPLIER_COMMODITY"] = 0.5
-                updates["TF_EMA_FAST"] = 10
+            profile = self._apply_regime_profile("Commodity", co_regime)
+            results["Commodity"] = {"regime": co_regime, "profile": profile, "atr_pct": co_atr}
             log_msgs.append(f"COM: {co_regime}")
 
-        if updates:
+        if results:
             self.last_tuned_time = now
-            for key, val in updates.items():
-                setattr(config, key, val)
-            
             logger.info("[AI TUNER] Regimes updated -> %s", " | ".join(log_msgs))
 
-        return updates
+        return results

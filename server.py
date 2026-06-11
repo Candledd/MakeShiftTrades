@@ -6,6 +6,7 @@ Run with:
 Then open  http://localhost:5000  in your browser.
 """
 import logging
+import os
 import threading
 import time
 import traceback
@@ -67,6 +68,20 @@ app = Flask(__name__)
 import logging as _logging
 _werkzeug_log = _logging.getLogger('werkzeug')
 _werkzeug_log.setLevel(_logging.ERROR)
+
+# ── API Key authentication ────────────────────────────────────────────────────
+# All /api/* routes require a valid API key passed via the X-API-Key header.
+# Set API_KEY in your .env file or environment. If unset, a mock key is used
+# for local development; change this before deploying to production.
+API_KEY = os.getenv("API_KEY", "dev-key-123")
+
+@app.before_request
+def _require_api_key():
+    if not request.path.startswith("/api/"):
+        return None
+    key = request.headers.get("X-API-Key", "")
+    if key != API_KEY:
+        return jsonify({"ok": False, "error": "Unauthorized — missing or invalid API key."}), 401
 
 TICKERS = ["NQ=F", "ES=F", "YM=F", "RTY=F", "SPY", "QQQ", "AAPL", "TSLA", "GC=F", "CL=F", "BTC-USD", "ETH-USD"]
 
@@ -896,4 +911,4 @@ def api_bot_broker():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000, host="127.0.0.1")
+    app.run(debug=os.getenv("FLASK_DEBUG", "false").lower() == "true", port=5000, host="127.0.0.1")

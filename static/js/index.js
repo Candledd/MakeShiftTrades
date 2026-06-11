@@ -1441,7 +1441,7 @@ async function toggleBotEngine() {
 
 function updateBotConfigLabels() {
   const riskVal = parseFloat(document.getElementById('bot-risk-slider').value);
-  document.getElementById('bot-risk-label').textContent = riskVal.toFixed(1) + '%';
+  document.getElementById('bot-risk-label').textContent = riskVal.toFixed(2) + '%';
   
   const positionsVal = parseInt(document.getElementById('bot-max-positions-slider').value, 10);
   document.getElementById('bot-max-positions-label').textContent = positionsVal;

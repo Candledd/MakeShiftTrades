@@ -8,13 +8,18 @@ CRYPTO_ASSETS = {"BTC-USD", "ETH-USD", "BTCUSD", "ETHUSD"}
 COMMODITY_ASSETS = {"GLD", "USO", "GC=F", "CL=F"}
 
 # ── Validation Constants ─────────────────────────────────────────────
+# The SPY and QQQ tradeable unit — they are ~0.95+ correlated and should
+# never be held simultaneously.
+SPY_QQQ_UNIT = {"SPY", "QQQ"}
+
 MAX_STOP_PCT = 0.10      # Maximum stop distance as fraction of entry (10%)
 MIN_STOP_PCT = 0.001     # Minimum stop distance as fraction of entry (0.1%)
 MIN_RR_RATIO = 1.5       # Minimum reward/risk ratio
 
 
 class RiskManager:
-    """Strategy-agnostic risk management: position sizing, validation, and correlation filtering."""
+    """Strategy-agnostic risk management: position sizing, validation,
+    tiered risk, spread/liquidity caps, gap buffer, and volatility shock adjustment."""
 
     def __init__(
         self,
@@ -27,10 +32,26 @@ class RiskManager:
         self.max_position_pct = max_position_pct
         self.max_notional = max_notional
         self.max_positions = max_positions
-        
+
         # Adaptive tracking state
         self.peak_equity = 0.0
-        
+
+        # ── Tiered risk overrides (loaded from config) ────────────────
+        import config as _cfg
+        self._tier_equity_pct = getattr(_cfg, 'RISK_TIER_EQUITY_PCT', 0.0025)
+        self._tier_crypto_pct = getattr(_cfg, 'RISK_TIER_CRYPTO_PCT', 0.0050)
+        self._tier_commodity_pct = getattr(_cfg, 'RISK_TIER_COMMODITY_PCT', 0.0035)
+
+        # ── Spread / liquidity cap ────────────────────────────────────
+        self._spread_atr_cap_pct = getattr(_cfg, 'SPREAD_ATR_CAP_PCT', 0.05)
+
+        # ── Gap / slippage buffer ─────────────────────────────────────
+        self._gap_buffer_pct = getattr(_cfg, 'GAP_SLIPPAGE_BUFFER_PCT', 0.001)
+
+        # ── Volatility shock ──────────────────────────────────────────
+        self._shock_atr_pct = getattr(_cfg, 'VOLATILITY_SHOCK_ATR_PCT', 0.03)
+        self._shock_reduction = getattr(_cfg, 'VOLATILITY_SHOCK_REDUCTION', 0.50)
+
         self.logger = logging.getLogger(__name__)
 
         # Ticker mapping: Yahoo Finance -> Alpaca format
@@ -39,15 +60,99 @@ class RiskManager:
             "ETH-USD": "ETHUSD",
         }
 
+    # ── Asset Tier Helpers ────────────────────────────────────────────
+
+    def _resolve_ticker(self, raw: str) -> str:
+        """Resolve a ticker to its canonical (Alpaca) form."""
+        return self._ticker_map.get(raw, raw)
+
+    def _get_tier_risk_pct(self, signal: StrategySignal) -> float:
+        """Return the risk-per-trade percentage for the signal's asset class.
+
+        Falls back to *self.max_risk_pct* for tickers not in any known tier.
+        """
+        ticker = self._resolve_ticker(signal.ticker)
+
+        if ticker in COMMODITY_ASSETS or signal.ticker in COMMODITY_ASSETS:
+            return self._tier_commodity_pct
+        if ticker in CRYPTO_ASSETS or signal.ticker in CRYPTO_ASSETS:
+            return self._tier_crypto_pct
+        if ticker in RISK_ON_ASSETS or signal.ticker in RISK_ON_ASSETS:
+            return self._tier_equity_pct
+
+        # Unknown asset — use general cap
+        return self.max_risk_pct
+
+    def _get_tier_name(self, signal: StrategySignal) -> str:
+        """Human-readable tier name for log messages."""
+        ticker = self._resolve_ticker(signal.ticker)
+        if ticker in COMMODITY_ASSETS or signal.ticker in COMMODITY_ASSETS:
+            return "commodity"
+        if ticker in CRYPTO_ASSETS or signal.ticker in CRYPTO_ASSETS:
+            return "crypto"
+        if ticker in RISK_ON_ASSETS or signal.ticker in RISK_ON_ASSETS:
+            return "equity"
+        return "unknown"
+
+    # ── Spread / Liquidity Validation ─────────────────────────────────
+
+    def _check_atr_spread(self, signal: StrategySignal) -> tuple[bool, str]:
+        """Reject trades where ATR/price exceeds the spread cap.
+
+        A high ATR‑to‑price ratio is a proxy for wide bid‑ask spreads or
+        illiquid markets.  Returns ``(True, "OK")`` or ``(False, reason)``.
+        """
+        if signal.atr <= 0 or signal.entry <= 0:
+            return (True, "OK")  # can't judge — pass
+
+        atr_pct = signal.atr / signal.entry
+        if atr_pct > self._spread_atr_cap_pct:
+            return (
+                False,
+                f"ATR spread cap: ATR/price {atr_pct:.4f} exceeds "
+                f"{self._spread_atr_cap_pct:.4f}",
+            )
+        return (True, "OK")
+
+    # ── Volatility Shock Adjustment ───────────────────────────────────
+
+    def _volatility_shock_factor(self, signal: StrategySignal) -> float:
+        """Return a multiplier (0..1) for positions during high volatility.
+
+        When ATR/price exceeds *self._shock_atr_pct*, return the configured
+        reduction factor (default 0.50).  Otherwise return 1.0 (no change).
+        """
+        if signal.atr <= 0 or signal.entry <= 0:
+            return 1.0
+
+        atr_pct = signal.atr / signal.entry
+        if atr_pct > self._shock_atr_pct:
+            self.logger.info(
+                "Volatility shock active: ATR/price %.4f > %.4f — reducing by %.0f%%",
+                atr_pct,
+                self._shock_atr_pct,
+                (1.0 - self._shock_reduction) * 100,
+            )
+            return self._shock_reduction
+        return 1.0
+
+    # ── Gap / Slippage Buffer ─────────────────────────────────────────
+
+    def _apply_gap_buffer(self, notional: float) -> float:
+        """Reduce notional by the gap/slippage buffer fraction."""
+        reduced = notional * (1.0 - self._gap_buffer_pct)
+        return max(1.0, round(reduced, 2))
+
     # ── Position Sizing ────────────────────────────────────────────────
 
     def calculate_position_size(
         self, signal: StrategySignal, account_equity: float
     ) -> float:
-        """Adaptive Stop-distance-based position sizing.
+        """Adaptive Stop-distance-based position sizing with tiered risk,
+        volatility shock protection, and gap/slippage buffer.
 
         Returns the notional dollar amount to invest, scaled dynamically by
-        signal confidence and account drawdown protection.
+        asset-class tier, signal confidence, drawdown, and volatility.
         """
         # 1. Update Peak Equity (High-Water Mark)
         if account_equity > self.peak_equity:
@@ -63,7 +168,11 @@ class RiskManager:
         confidence_clamped = max(10.0, min(100.0, signal.confidence))
         conf_multiplier = confidence_clamped / 100.0
 
-        # 4. Sector-Specific AI Multiplier
+        # 4. Tiered Risk Percentage (asset-class-aware)
+        tier_risk_pct = self._get_tier_risk_pct(signal)
+        tier_name = self._get_tier_name(signal)
+
+        # 5. Sector-Specific AI Multiplier
         import config
         if signal.strategy_name == "mean_reversion":
             ai_mult = getattr(config, 'AI_RISK_MULTIPLIER_EQUITY', 1.0)
@@ -74,11 +183,20 @@ class RiskManager:
         else:
             ai_mult = 1.0
 
-        # 5. Final Adaptive Risk Calculation
-        adaptive_risk_pct = self.max_risk_pct * ai_mult * dd_multiplier * conf_multiplier
+        # 6. Volatility Shock Factor
+        shock_mult = self._volatility_shock_factor(signal)
+
+        # 7. Final Adaptive Risk Calculation
+        adaptive_risk_pct = (
+            tier_risk_pct * ai_mult * dd_multiplier * conf_multiplier * shock_mult
+        )
+
+        # Enforce absolute 1% maximum hard limit regardless of multipliers
+        adaptive_risk_pct = min(adaptive_risk_pct, 0.01)
+
         risk_dollars = account_equity * adaptive_risk_pct
 
-        # 6. Stop Distance Translation
+        # 8. Stop Distance Translation
         stop_distance = abs(signal.entry - signal.stop_loss)
         if stop_distance <= 0:
             return 0.0
@@ -86,16 +204,21 @@ class RiskManager:
         position_size_shares = risk_dollars / stop_distance
         notional = position_size_shares * signal.entry
 
-        # 7. Apply Absolute Caps
+        # 9. Apply Absolute Caps
         notional = min(notional, account_equity * self.max_position_pct)
         notional = min(notional, self.max_notional)
         notional = max(1.0, round(notional, 2))
 
+        # 10. Gap / Slippage Buffer
+        notional = self._apply_gap_buffer(notional)
+
         self.logger.info(
-            "Adaptive Sizing | Conf: %.1f%% | Regime Mult: %.2fx | "
-            "Drawdown Mult: %.2fx | Risk: %.3f%% ($%.2f) | Notional: $%.2f",
+            "Adaptive Sizing | Tier: %s @ %.4f%% | Conf: %.1f%% | "
+            "Shock: %.2fx | DD: %.2fx | Risk: %.3f%% ($%.2f) | Notional: $%.2f",
+            tier_name,
+            tier_risk_pct * 100,
             confidence_clamped,
-            ai_mult,
+            shock_mult,
             dd_multiplier,
             adaptive_risk_pct * 100,
             risk_dollars,
@@ -161,6 +284,15 @@ class RiskManager:
         if signal.ticker in self._ticker_map and self._ticker_map[signal.ticker] in pending_order_symbols:
             return (False, f"Pending order guard: {self._ticker_map[signal.ticker]} already has an unfilled active order")
 
+        # 1C. SPY/QQQ tradeable unit guard — highly correlated (0.95+), treat as single position
+        signal_resolved = self._resolve_ticker(signal.ticker)
+        if signal_resolved in SPY_QQQ_UNIT:
+            counterpart = "QQQ" if signal_resolved == "SPY" else "SPY"
+            if counterpart in position_symbols:
+                return (False, f"SPY/QQQ guard: {counterpart} already open; rejecting {signal.ticker} (0.95+ correlated)")
+            if counterpart in pending_order_symbols:
+                return (False, f"SPY/QQQ guard: {counterpart} has pending order; rejecting {signal.ticker}")
+
         # 4. Total positions cap
         if len(current_positions) >= self.max_positions:
             return (
@@ -168,36 +300,34 @@ class RiskManager:
                 f"Correlation filter: max positions ({self.max_positions}) reached",
             )
 
-        # 5. Commodities are always allowed through risk-on rules 2 & 3
-        if signal.ticker in COMMODITY_ASSETS:
-            return (True, "OK")
-
-        # 2 & 3. Risk-on correlation — count long / short positions in both
-        #         RISK_ON_ASSETS and CRYPTO_ASSETS (symmetric for all risk assets)
+        # 2 & 3. Risk-on correlation — count long / short positions across all
+        #         major asset classes (equity, crypto, commodity)
         risk_on_long = 0
         risk_on_short = 0
         for pos in current_positions:
             sym = pos.get("symbol", "")
             side = pos.get("side", "").lower()
-            if sym in RISK_ON_ASSETS or sym in CRYPTO_ASSETS:
+            if sym in RISK_ON_ASSETS or sym in CRYPTO_ASSETS or sym in COMMODITY_ASSETS:
                 if side == "long":
                     risk_on_long += 1
                 elif side == "short":
                     risk_on_short += 1
 
         signal_normalized = self._ticker_map.get(signal.ticker, signal.ticker)
-        signal_is_risk_or_crypto = (
+        signal_is_risk_asset = (
             signal.ticker in RISK_ON_ASSETS
             or signal.ticker in CRYPTO_ASSETS
+            or signal.ticker in COMMODITY_ASSETS
             or signal_normalized in RISK_ON_ASSETS
             or signal_normalized in CRYPTO_ASSETS
+            or signal_normalized in COMMODITY_ASSETS
         )
 
-        if signal.direction == "BUY" and signal_is_risk_or_crypto:
+        if signal.direction == "BUY" and signal_is_risk_asset:
             if risk_on_long >= 2:
                 return (False, "Correlation filter: 2+ risk-on longs already open")
 
-        if signal.direction == "SELL" and signal_is_risk_or_crypto:
+        if signal.direction == "SELL" and signal_is_risk_asset:
             if risk_on_short >= 2:
                 return (False, "Correlation filter: 2+ risk-on shorts already open")
 
@@ -206,7 +336,8 @@ class RiskManager:
     # ── Signal Validation ──────────────────────────────────────────────
 
     def validate_signal(self, signal: StrategySignal) -> tuple[bool, str]:
-        """Validate the signal's price, stop, R/R and direction consistency.
+        """Validate the signal's price, stop, R/R, direction consistency,
+        and ATR-based spread/liquidity cap.
 
         Returns ``(True, "OK")`` or ``(False, reason)``.
         """
@@ -247,6 +378,11 @@ class RiskManager:
         # 5. Confidence must be positive
         if signal.confidence <= 0:
             return (False, "Confidence must be > 0")
+
+        # 6. ATR-based spread / liquidity cap
+        spread_ok, spread_reason = self._check_atr_spread(signal)
+        if not spread_ok:
+            return (False, spread_reason)
 
         return (True, "OK")
 

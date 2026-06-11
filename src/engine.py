@@ -21,8 +21,10 @@ from src.strategies import StrategySignal
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum_breakout import MomentumBreakoutStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
+from src.strategies.trend_pullback import TrendPullbackStrategy
 from src.risk_manager import RiskManager
 from src.alpaca_trader import AlpacaTrader
+from src.macro_filter import SEVERITY_FLATTEN_ALL, SEVERITY_NORMAL, SEVERITY_NO_NEW_ENTRIES
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +76,15 @@ class TradingEngine:
         self.mean_rev = MeanReversionStrategy()
         self.momentum = MomentumBreakoutStrategy()
         self.trend = TrendFollowingStrategy()
+        self.pullback = TrendPullbackStrategy()
 
         # Scan manifest — (ticker, strategy, interval)
+        # SPY/QQQ run through BOTH mean_rev and pullback strategies.
         self.instruments = [
             {"ticker": "SPY", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
+            {"ticker": "SPY", "strategy": self.pullback, "interval_seconds": 900, "last_scan": 0},
             {"ticker": "QQQ", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
+            {"ticker": "QQQ", "strategy": self.pullback, "interval_seconds": 900, "last_scan": 0},
             {"ticker": "BTC-USD", "strategy": self.momentum, "interval_seconds": 3600, "last_scan": 0},
             {"ticker": "GLD", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
             {"ticker": "USO", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
@@ -188,10 +194,35 @@ class TradingEngine:
         # Keep risk manager in sync with user config (sector multipliers are now handled inside the risk manager per-trade)
         self.risk_manager.max_risk_pct = config.MAX_RISK_PCT
 
-        # Macro Kill Switch — pause scans during high-risk event windows
-        if config.MACRO_FILTER_ENABLED and self.macro_filter.is_red_flag_window(now):
-            logger.info("Macro Kill Switch active. Pausing scans.")
-            return
+        # Macro Kill Switch — consume severity levels from check_event()
+        if config.MACRO_FILTER_ENABLED:
+            severity, event_name = self.macro_filter.check_event(now)
+            if severity == SEVERITY_FLATTEN_ALL:
+                logger.info(
+                    "Macro Kill Switch: %s active (severity=FLATTEN_ALL). Flattening all positions.",
+                    event_name,
+                )
+                # Close all active positions
+                try:
+                    positions = self.trader.get_positions()
+                    for pos in positions:
+                        sym = pos["symbol"]
+                        logger.info("  Closing position %s due to macro flatten", sym)
+                        try:
+                            self.trader._client.close_position(sym)
+                        except Exception as exc:
+                            logger.error("Failed to close %s: %s", sym, exc)
+                except Exception as exc:
+                    logger.warning("Could not list positions for flatten: %s", exc)
+                # Clear position state tracking
+                self._position_state.clear()
+                return
+            elif severity == SEVERITY_NO_NEW_ENTRIES:
+                logger.info(
+                    "Macro Kill Switch: %s active (severity=NO_NEW_ENTRIES). Skipping new entries.",
+                    event_name,
+                )
+                return
 
         self._cleanup_stale_orders()
         self._manage_positions()
@@ -308,10 +339,10 @@ class TradingEngine:
         existing_conf = state.get("confidence", 0.0)
 
         existing_pos = next((p for p in positions if p['symbol'] == alpaca_ticker), None)
-        active_entry_orders = [o for o in active_orders if o.symbol == alpaca_ticker and getattr(o, 'parent_id', None) is None]
+        active_entry_orders = [o for o in active_orders if o.get('symbol') == alpaca_ticker and o.get('order_class') == 'bracket' and o.get('status') in ['new', 'accepted', 'pending_new']]
 
         for o in active_entry_orders:
-            j_entry = self.trader._state.get("order_journal", {}).get(str(o.id), {})
+            j_entry = self.trader._state.get("order_journal", {}).get(o.get('id', ''), {})
             existing_conf = max(existing_conf, j_entry.get("confidence", 0.0))
 
         if existing_pos or active_entry_orders:
@@ -333,7 +364,7 @@ class TradingEngine:
                             signal.ticker, signal.confidence, existing_conf, tp_change_abs, sl_change_abs, atr_buffer)
                 if active_entry_orders:
                     for o in active_entry_orders:
-                        self.trader.cancel_order(str(o.id))
+                        self.trader.cancel_order(str(o.get('id', '')))
                     time.sleep(1)
                     active_orders_res = self.trader.get_active_orders()
                     active_orders = active_orders_res.get("orders", []) if active_orders_res.get("ok") else []
@@ -466,8 +497,8 @@ class TradingEngine:
                 if sub:
                     age_h = (now - sub).total_seconds() / 3600.0
                     if age_h > config.ORDER_TTL_HOURS:
-                        logger.info("[TTL SWEEP] Canceling stale entry order %s (Age: %.1fh)", o.symbol, age_h)
-                        self.trader.cancel_order(str(o.id))
+                        logger.info("[TTL SWEEP] Canceling stale entry order %s (Age: %.1fh)", o.get('symbol', 'unknown'), age_h)
+                        self.trader.cancel_order(str(o.get('id', '')))
 
     def _manage_positions(self) -> None:
         """Monitor open positions and close based on trailing/stop loss or time stop."""
@@ -497,29 +528,16 @@ class TradingEngine:
                     "lowest": current_price,
                 }
 
-            # ── Scale-out / breakeven tracking ─────────────────────────
-            current_qty = abs(float(pos.get('qty', 0)))
             state = self._position_state[sym]
-            if 'max_qty' not in state:
-                state['max_qty'] = current_qty
-            if 'entry_price' not in state:
-                state['entry_price'] = float(pos.get('avg_entry_price', current_price))
-
-            if current_qty < state['max_qty'] and not state.get('breakeven_set'):
-                logger.info("Scale-out hit for %s. Moving stop to breakeven.", sym)
-                self.trader.move_stop_to_breakeven(sym, state['entry_price'])
-                state['breakeven_set'] = True
-                state['max_qty'] = current_qty
 
             # Update highest/lowest
-            state = self._position_state[sym]
             if current_price > state['highest']:
                 state['highest'] = current_price
             if current_price < state['lowest']:
                 state['lowest'] = current_price
 
             # ── Trailing Stop ──────────────────────────────────────────
-            trail_dist = current_price * 0.01 * config.TRAILING_STOP_ATR_MULT
+            trail_dist = current_price * 0.01 * config.TRAILING_STOP_PCT
 
             should_close = False
             if side == 'long' and current_price < state['highest'] - trail_dist:
@@ -536,10 +554,21 @@ class TradingEngine:
                 del self._position_state[sym]
                 continue
 
-            # ── Time Stop ──────────────────────────────────────────────
+            # ── Time Stop (per-asset-class) ────────────────────────────
+            # Default to equity hours; override for crypto and commodity
+            if sym in ("BTCUSD", "ETHUSD", "BCHUSD", "LTCUSD", "UNIUSD", "LINKUSD"):
+                time_stop_hours = config.TIME_STOP_CRYPTO_HOURS
+            elif sym in ("GLD", "USO"):
+                time_stop_hours = config.TIME_STOP_COMMODITY_HOURS
+            else:
+                time_stop_hours = config.TIME_STOP_EQUITY_HOURS
+
             hours_open = (time.time() - state['open_ts']) / 3600.0
-            if hours_open > config.TIME_STOP_HOURS and (unrealized_pl / (market_value + 1e-9)) < 0.005:
-                logger.info("Closing %s due to time stop", sym)
+            if hours_open > time_stop_hours and (unrealized_pl / (market_value + 1e-9)) < 0.005:
+                logger.info(
+                    "Closing %s due to time stop (%.1f hours)",
+                    sym, time_stop_hours,
+                )
                 try:
                     self.trader._client.close_position(sym)
                 except Exception as e:

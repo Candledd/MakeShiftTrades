@@ -1,7 +1,8 @@
 """MakeShiftTrades — Multi-Asset Trading Bot
 
 Strategies:
-  - Mean Reversion on SPY, QQQ (15m candles)
+  - Equity Trend Pullback on SPY, QQQ (15m candles)   — Playbook 1A
+  - Equity Mean Reversion on SPY, QQQ (15m candles)   — Playbook 1B
   - Momentum Breakout on BTC-USD (1h candles)
   - Trend Following on GLD, USO (4h candles)
 
