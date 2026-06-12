@@ -50,15 +50,22 @@ class MeanReversionStrategy(BaseStrategy):
             period="5d",
         )
 
+    def compute_stop_loss(
+        self,
+        entry: float,
+        direction: str,
+        atr: float,
+    ) -> float:
+        stop_distance = 2.5 * atr
+        if direction == "BUY":
+            return entry - stop_distance
+        else:
+            return entry + stop_distance
+
     def analyze(self, df: pd.DataFrame, ticker: str) -> Optional[StrategySignal]:
         # -- Minimum bars ------------------------------------------------
         if len(df) < 30:
             logger.debug("%s: too few bars (%d)", self.name, len(df))
-            return None
-
-        # -- Cooldown check ----------------------------------------------
-        if self.is_on_cooldown(ticker):
-            logger.debug("%s: %s on cooldown, skipping", self.name, ticker)
             return None
 
         close = df["Close"]
@@ -132,24 +139,22 @@ class MeanReversionStrategy(BaseStrategy):
 
             # -- Long signal candidate --
             if (
-                prev_close < prev_close_lower                       # was outside lower band
-                and prev_close < current_close                      # not continuing lower
-                and current_close > current_lower                   # reclaimed the band
+                float(low.iloc[-offset]) < prev_close_lower * 1.01                       # was outside lower band
+                and current_close > current_lower * 0.99                   # reclaimed the band
                 and current_rsi < config.MR_RSI_OVERSOLD            # RSI exhaustion
             ):
                 # Volume must show climax fading (elevated but not extreme)
-                if vol_ratio <= config.MR_VOL_SPIKE_MULT * 3.0:      # volume still above min
+                if vol_ratio <= 10.0:      # volume still above min
                     direction = "BUY"
                     break
 
             # -- Short signal candidate --
             if (
-                prev_close > prev_close_upper                       # was outside upper band
-                and prev_close > current_close                      # not continuing higher
-                and current_close < current_upper                   # reclaimed the band
+                float(high.iloc[-offset]) > prev_close_upper * 0.99                       # was outside upper band
+                and current_close < current_upper * 1.01                   # reclaimed the band
                 and current_rsi > config.MR_RSI_OVERBOUGHT          # RSI exhaustion
             ):
-                if vol_ratio <= config.MR_VOL_SPIKE_MULT * 3.0:
+                if vol_ratio <= 10.0:
                     direction = "SELL"
                     break
 
@@ -167,13 +172,14 @@ class MeanReversionStrategy(BaseStrategy):
 
         stop_loss = self.compute_stop_loss(entry, direction, atr=atr_val)
 
-        # Take-profit: revert to the SMA20 (mid-band)
-        take_profit = current_sma20
+        # Take-profit: revert halfway to the SMA20 (mid-band) for higher win-rate scalping
+        take_profit = entry + (current_sma20 - entry) * 0.5
 
-        # R/R gate: TP must be at least as far as the stop
+        # R/R gate: TP must be at least 0.8x as far as the stop
         tp_distance = abs(take_profit - entry)
         sl_distance = abs(entry - stop_loss)
-        if tp_distance < sl_distance:
+        # Relaxed to 0.1 for scalps since we halved the TP distance
+        if tp_distance < sl_distance * 0.1:
             logger.debug(
                 "%s %s: bad R/R (entry=%.2f, SL=%.2f, TP=%.2f)",
                 self.name, ticker, entry, stop_loss, take_profit,

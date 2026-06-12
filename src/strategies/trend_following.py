@@ -17,13 +17,13 @@ class TrendFollowingStrategy(BaseStrategy):
     GLD: trend filter (HTF) + pullback/breakout entries, lower turnover,
          structure-based trailing exits. Avoids short-term MACD flips.
 
-    USO: wider volatility / ADX filters, chop avoidance via BB width,
+    PDBC: wider volatility / ADX filters, chop avoidance via BB width,
          trend-following only when range expansion is real.
          Initial bracket target with trailing for uncapped upside.
     """
 
     name = "trend_following"
-    tickers = ["GLD", "USO"]
+    tickers = ["GLD", "PDBC"]
     timeframe = "4h"
     period = "3mo"
 
@@ -31,12 +31,12 @@ class TrendFollowingStrategy(BaseStrategy):
     # GLD: tighter stops, trend-confirmation required
     GLD_STOP_MULT = 1.8       # ATR multiplier for stop loss
     GLD_TP_MULT = 3.0         # ATR multiplier for initial bracket target
-    GLD_ADX_MIN = 20.0        # minimum ADX strength
+    GLD_ADX_MIN = 25.0        # minimum ADX strength
 
-    # USO: wider stops for oil volatility, stricter ADX to avoid chop
-    USO_STOP_MULT = 2.5       # ATR multiplier for stop loss (wider)
-    USO_TP_MULT = 4.0         # ATR multiplier for initial bracket target
-    USO_ADX_MIN = 25.0        # higher ADX = only real trends
+    # PDBC: wider stops for oil volatility, stricter ADX to avoid chop
+    PDBC_STOP_MULT = 2.5       # ATR multiplier for stop loss (wider)
+    PDBC_TP_MULT = 4.0         # ATR multiplier for initial bracket target
+    PDBC_ADX_MIN = 25.0        # higher ADX = only real trends
 
     def __init__(self) -> None:
         super().__init__(
@@ -175,8 +175,8 @@ class TrendFollowingStrategy(BaseStrategy):
                 htf_trend=htf_trend,
                 ticker=ticker,
             )
-        elif ticker == "USO":
-            return self._analyze_uso(
+        elif ticker == "PDBC":
+            return self._analyze_pdbc(
                 indicators=indicators,
                 atr_val=atr_val,
                 current_close=current_close,
@@ -418,10 +418,10 @@ class TrendFollowingStrategy(BaseStrategy):
         )
 
     # ──────────────────────────────────────────────────────────────────────
-    # USO: wider volatility filters, chop avoidance, range expansion
+    # PDBC: wider volatility filters, chop avoidance, range expansion
     # ──────────────────────────────────────────────────────────────────────
 
-    def _analyze_uso(
+    def _analyze_pdbc(
         self,
         indicators: dict,
         atr_val: float,
@@ -438,7 +438,7 @@ class TrendFollowingStrategy(BaseStrategy):
         htf_trend: Optional[str],
         ticker: str,
     ) -> Optional[StrategySignal]:
-        """USO-specific analysis: chop avoidance, range expansion, wider stops."""
+        """PDBC-specific analysis: chop avoidance, range expansion, wider stops."""
 
         close = indicators["close"]
         high = indicators["high"]
@@ -467,22 +467,22 @@ class TrendFollowingStrategy(BaseStrategy):
 
         if chop_zone:
             logger.debug(
-                "%s: USO — chop zone detected (BB width %.4f < median %.4f), skipping",
+                "%s: PDBC — chop zone detected (BB width %.4f < median %.4f), skipping",
                 ticker, current_bb_width, bb_width_median,
             )
             return None
 
-        # ── Stricter ADX for USO — avoid weak trends ───────────────────
-        if current_adx < self.USO_ADX_MIN:
+        # ── Stricter ADX for PDBC — avoid weak trends ───────────────────
+        if current_adx < self.PDBC_ADX_MIN:
             logger.debug(
-                "%s: USO — ADX too weak (%.1f < %.1f), skipping",
-                ticker, current_adx, self.USO_ADX_MIN,
+                "%s: PDBC — ADX too weak (%.1f < %.1f), skipping",
+                ticker, current_adx, self.PDBC_ADX_MIN,
             )
             return None
         reason_parts.append(f"ADX {current_adx:.0f}")
 
         # ── Primary trend direction ─────────────────────────────────────
-        # USO needs unambiguous EMA alignment (not just any crossover)
+        # PDBC needs unambiguous EMA alignment (not just any crossover)
         bullish_aligned = (current_ema20 > current_ema50
                            and current_close > current_ema20)
         bearish_aligned = (current_ema20 < current_ema50
@@ -502,7 +502,7 @@ class TrendFollowingStrategy(BaseStrategy):
             reason_parts.append("Close < EMA20")
         else:
             logger.debug(
-                "%s: USO — no aligned trend with MACD confirmation", ticker
+                "%s: PDBC — no aligned trend with MACD confirmation", ticker
             )
             return None
 
@@ -522,7 +522,7 @@ class TrendFollowingStrategy(BaseStrategy):
 
         if not range_expanding:
             logger.debug(
-                "%s: USO — range too narrow (%.2f < %.2f * 0.7), skipping",
+                "%s: PDBC — range too narrow (%.2f < %.2f * 0.7), skipping",
                 ticker, current_range, avg_range_20,
             )
             return None
@@ -533,14 +533,14 @@ class TrendFollowingStrategy(BaseStrategy):
                 direction == "SELL" and htf_trend != "bearish"
             ):
                 logger.debug(
-                    "%s: USO — HTF trend (%s) conflicts with %s",
+                    "%s: PDBC — HTF trend (%s) conflicts with %s",
                     ticker, htf_trend, direction,
                 )
                 return None
 
-        # ── Stop loss & initial target (wider for USO) ─────────────────
-        stop_mult = self.USO_STOP_MULT
-        tp_mult = self.USO_TP_MULT
+        # ── Stop loss & initial target (wider for PDBC) ─────────────────
+        stop_mult = self.PDBC_STOP_MULT
+        tp_mult = self.PDBC_TP_MULT
 
         if direction == "BUY":
             entry = current_close

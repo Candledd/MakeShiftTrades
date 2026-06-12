@@ -901,10 +901,32 @@ def api_bot_broker():
     if not trader:
         return jsonify({"ok": False, "error": _alpaca_init_error or "AlpacaTrader unavailable"}), 503
     
+    positions = trader.get_positions()
+    orders = trader.get_active_orders().get("orders", [])
+
+    broker_exits = {}
+    for o in orders:
+        sym = o.get("symbol")
+        if not sym: continue
+        otype = o.get("type", "")
+        if otype == "stop":
+            broker_exits.setdefault(sym, {})["stop"] = o.get("stop_price")
+        elif otype == "limit":
+            broker_exits.setdefault(sym, {})["limit"] = o.get("limit_price")
+
+    for pos in positions:
+        sym = pos.get("symbol")
+        st = _bot_engine._position_state.get(sym, {}) if _bot_engine else {}
+        exits = broker_exits.get(sym, {})
+        sl = exits.get("stop") if "stop" in exits else st.get("stop_loss")
+        tp = exits.get("limit") if "limit" in exits else st.get("take_profit")
+        pos["stop_loss"] = sl
+        pos["take_profit"] = tp
+
     return jsonify({
         "ok": True,
-        "positions": trader.get_positions(),
-        "orders": trader.get_active_orders().get("orders", [])
+        "positions": positions,
+        "orders": orders
     })
 
 

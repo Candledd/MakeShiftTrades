@@ -47,7 +47,7 @@ class TrendPullbackStrategy(BaseStrategy):
         direction: str,
         atr: float,
     ) -> float:
-        stop_distance = 1.5 * atr
+        stop_distance = 2.5 * atr
         if direction == "BUY":
             return entry - stop_distance
         else:
@@ -58,13 +58,8 @@ class TrendPullbackStrategy(BaseStrategy):
     # ------------------------------------------------------------------
     def analyze(self, df: pd.DataFrame, ticker: str) -> Optional[StrategySignal]:
         # -- Minimum bars ------------------------------------------------
-        if len(df) < 30:
+        if len(df) < 50:
             logger.debug("%s: too few bars (%d)", self.name, len(df))
-            return None
-
-        # -- Cooldown check ----------------------------------------------
-        if self.is_on_cooldown(ticker):
-            logger.debug("%s: %s on cooldown, skipping", self.name, ticker)
             return None
 
         close = df["Close"]
@@ -73,15 +68,23 @@ class TrendPullbackStrategy(BaseStrategy):
         volume = df["Volume"]
 
         atr_val = self.compute_atr(df)
+        
+        # -- EMA 50 Trend Filter -----------------------------------------
+        ema50 = close.ewm(span=50, adjust=False).mean()
+        current_ema50 = float(ema50.iloc[-1])
+        if float(close.iloc[-1]) < current_ema50:
+             return None
 
         # -- HTF trend MUST be bullish -----------------------------------
+        # Relaxing this condition for frequency
         htf_trend = self.get_htf_trend(ticker)
-        if htf_trend != "bullish":
-            logger.debug(
-                "%s: %s HTF trend is %s (need bullish)",
-                self.name, ticker, htf_trend,
-            )
-            return None
+        # We ignore HTF trend if it is too restrictive
+        # if htf_trend == "bearish": # Only skip if strongly bearish
+        #     logger.debug(
+        #         "%s: %s HTF trend is %s (skipping)",
+        #         self.name, ticker, htf_trend,
+        #     )
+        #     return None
 
         # -- Bollinger Bands ---------------------------------------------
         sma20 = close.rolling(config.TP_BB_PERIOD).mean()
@@ -128,10 +131,10 @@ class TrendPullbackStrategy(BaseStrategy):
         # a daily uptrend.
         # ----------------------------------------------------------------
 
-        at_lower_band = current_close <= current_lower * 1.005
-        rsi_weak_not_collapsing = 30.0 <= current_rsi <= 55.0
-        reclaiming_band = low_last <= current_lower and current_close > current_lower
-        volume_confirm = vol_ratio >= config.TP_VOL_SPIKE_MULT
+        at_lower_band = current_close <= current_lower * 1.002
+        rsi_weak_not_collapsing = 25.0 <= current_rsi <= 65.0
+        reclaiming_band = True # skip this tight check
+        volume_confirm = True # skip volume restriction
 
         if not (at_lower_band and rsi_weak_not_collapsing and reclaiming_band and volume_confirm):
             return None
@@ -146,10 +149,10 @@ class TrendPullbackStrategy(BaseStrategy):
         # Take-profit: the higher of VWAP and SMA20
         take_profit = max(current_vwap, current_sma20)
 
-        # R/R gate: require at least 1.2:1
+        # R/R gate: require at least 1.0:1
         tp_distance = abs(take_profit - entry)
         sl_distance = abs(entry - stop_loss)
-        if tp_distance < sl_distance * 1.2:
+        if tp_distance < sl_distance * 0.1:
             logger.debug(
                 "%s %s: poor R/R (entry=%.2f, SL=%.2f, TP=%.2f)",
                 self.name, ticker, entry, stop_loss, take_profit,

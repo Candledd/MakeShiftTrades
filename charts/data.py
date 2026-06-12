@@ -32,6 +32,8 @@ _PERIOD_TO_DAYS: dict[str, int] = {
     "5d":   5,
     "1mo":  30,
     "3mo":  90,
+    "6mo":  180,
+    "1y":   365,
 }
 
 _CRYPTO_SUFFIXES: tuple[str, ...] = ("-USD", "-USDT", "-USDC")

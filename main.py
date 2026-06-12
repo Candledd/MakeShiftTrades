@@ -4,7 +4,7 @@ Strategies:
   - Equity Trend Pullback on SPY, QQQ (15m candles)   — Playbook 1A
   - Equity Mean Reversion on SPY, QQQ (15m candles)   — Playbook 1B
   - Momentum Breakout on BTC-USD (1h candles)
-  - Trend Following on GLD, USO (4h candles)
+  - Trend Following on GLD, PDBC (4h candles)
 
 Usage:
     python main.py              # Run the bot

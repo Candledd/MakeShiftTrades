@@ -90,7 +90,7 @@ class TradingEngine:
             {"ticker": "QQQ", "strategy": self.pullback, "interval_seconds": 900, "last_scan": 0},
             {"ticker": "BTC-USD", "strategy": self.momentum, "interval_seconds": 3600, "last_scan": 0},
             {"ticker": "GLD", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
-            {"ticker": "USO", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
+            {"ticker": "PDBC", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
         ]
 
         # Save base intervals for adaptive scanning
@@ -332,18 +332,7 @@ class TradingEngine:
         active_orders_res = self.trader.get_active_orders()
         active_orders = active_orders_res.get("orders", []) if active_orders_res.get("ok") else []
 
-        # Market Hours Guard: Block non-crypto orders when market is closed to prevent 
-        # overnight gap risk on queued market orders.
-        is_crypto = signal.ticker in {"BTC-USD", "ETH-USD", "BTCUSD", "ETHUSD"}
-        if not is_crypto:
-            try:
-                # NOTE: accessing private _client — no public get_clock() on AlpacaTrader
-                clock = self.trader._client.get_clock()
-                if not clock.is_open:
-                    logger.info("[REJECTED] %s %s: Market is closed (guarding against overnight gap risk)", signal.direction, signal.ticker)
-                    return
-            except Exception as exc:
-                logger.warning("Could not check market hours: %s", exc)
+        # (Market hours guard removed to allow Extended Hours limit order entries)
 
         # ── Signal Upgrade Intercept ───────────────────────────────────────
         # If we already have a position or pending entry orders for this ticker,
@@ -471,6 +460,7 @@ class TradingEngine:
                 "confidence": signal.confidence,
                 "reason": signal.reason,
                 "atr": signal.atr,
+                "regime": self._get_signal_regime(signal.strategy_name),
             },
         )
 
@@ -553,15 +543,49 @@ class TradingEngine:
             _mfe = _entry - state.get('lowest', current_price)
             _mae = state.get('highest', current_price) - _entry
 
-        # Close position first (so we don't log a phantom trade on failure)
+        # Capture the order returned by Alpaca to get the actual fill price
+        order = None
         try:
             if qty_pct is not None:
-                self.trader._client.close_position(sym, percentage=qty_pct)
+                order = self.trader._client.close_position(sym, percentage=qty_pct)
             else:
-                self.trader._client.close_position(sym)
+                order = self.trader._client.close_position(sym)
         except Exception as e:
             logger.error("Failed to close position %s: %s", sym, e)
             return False
+
+        # Extract actual fill price from the returned Order object
+        exit_price = current_price  # fallback
+        order_id = None
+        if order is not None:
+            try:
+                order_id = str(order.id) if getattr(order, 'id', None) else None
+                fap = getattr(order, 'filled_avg_price', None)
+                if fap is not None:
+                    exit_price = float(fap)
+                elif order_id:
+                    # Short poll if fill hasn't settled yet
+                    for _ in range(3):
+                        time.sleep(0.3)
+                        try:
+                            refreshed = self.trader._client.get_order_by_id(order_id)
+                            fap2 = getattr(refreshed, 'filled_avg_price', None)
+                            if fap2 is not None:
+                                exit_price = float(fap2)
+                                break
+                        except Exception:
+                            pass
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Could not parse filled_avg_price for %s: %s — using current_price",
+                    sym, exc,
+                )
+
+        # Mark order journal as DB-logged to avoid double-logging in sync_closed_trades
+        if order_id:
+            journal = self.trader._state.setdefault("order_journal", {})
+            if order_id in journal:
+                journal[order_id]["db_logged"] = True
 
         # Calculate exact fraction closed for accurate R-multiple logging
         closed_fraction = float(qty_pct) / 100.0 if qty_pct else 1.0
@@ -575,7 +599,7 @@ class TradingEngine:
                 strategy=state.get('strategy', 'unknown'),
                 direction=side,
                 entry_price=_entry,
-                exit_price=current_price,
+                exit_price=exit_price,
                 stop_loss=state.get('stop_loss', 0.0),
                 qty=logged_qty,
                 pnl=logged_pnl,
@@ -598,9 +622,19 @@ class TradingEngine:
         positions = self.trader.get_positions()
         current_syms = {pos['symbol'] for pos in positions}
 
-        # Fetch active orders to avoid removing state when pending orders exist
         res = self.trader.get_active_orders()
-        active_syms = {o.get('symbol') for o in res.get('orders', [])} if res.get('ok') else set()
+        active_orders = res.get('orders', []) if res.get('ok') else []
+        active_syms = {o.get('symbol') for o in active_orders}
+
+        broker_exits = {}
+        for o in active_orders:
+            sym = o.get("symbol")
+            if not sym: continue
+            otype = o.get("type", "")
+            if otype == "stop":
+                broker_exits.setdefault(sym, {})["stop"] = True
+            elif otype == "limit":
+                broker_exits.setdefault(sym, {})["limit"] = True
 
         # Clean up symbols no longer in current positions
         for sym in list(self._position_state.keys()):
@@ -616,8 +650,23 @@ class TradingEngine:
 
             # Initialise tracking entry if new position or if missing tracking fields
             if sym not in self._position_state or 'open_ts' not in self._position_state[sym]:
-                entry = self._position_state.get(sym, {}).get('entry_price', current_price)
-                self._position_state.setdefault(sym, {}).update({
+                _state = self._position_state.setdefault(sym, {})
+                
+                # Recover missing fields after restart
+                if 'entry_price' not in _state:
+                    _state['entry_price'] = pos.get('avg_entry_price', current_price)
+                if 'qty' not in _state:
+                    _state['qty'] = pos.get('qty', 0.0)
+                if 'stop_loss' not in _state:
+                    # Conservative fallback stop
+                    _state['stop_loss'] = current_price * 0.95 if side == 'long' else current_price * 1.05
+                if 'strategy' not in _state:
+                    _state['strategy'] = 'unknown_restarted'
+                if 'regime' not in _state:
+                    _state['regime'] = 'unknown'
+
+                entry = _state['entry_price']
+                _state.update({
                     "open_ts": time.time(),
                     "highest": max(current_price, entry),
                     "lowest": min(current_price, entry),
@@ -631,30 +680,30 @@ class TradingEngine:
             if current_price < state['lowest']:
                 state['lowest'] = current_price
 
-            # ── Synthetic Crypto Bracket Management ────────────────────
-            is_crypto = sym in ("BTCUSD", "ETHUSD", "BCHUSD", "LTCUSD", "UNIUSD", "LINKUSD")
-            if is_crypto:
-                # 1. Synthetic Stop Loss
-                if 'stop_loss' in state:
-                    if (side == 'long' and current_price <= state['stop_loss']) or \
-                       (side == 'short' and current_price >= state['stop_loss']):
-                        logger.info("Closing crypto position %s due to synthetic stop loss", sym)
-                        if self._close_and_log_position(sym, state, current_price, unrealized_pl, 'synthetic_sl'):
-                            del self._position_state[sym]
-                        else:
-                            logger.warning("Synthetic SL close failed; preserving state for retry")
-                        continue
+            # ── Synthetic Bracket Management (Crypto & Extended Hours) ──
+            has_broker_sl = broker_exits.get(sym, {}).get("stop")
+            has_broker_tp = broker_exits.get(sym, {}).get("limit")
+            
+            # 1. Synthetic Stop Loss
+            if 'stop_loss' in state and not has_broker_sl:
+                if (side == 'long' and current_price <= state['stop_loss']) or \
+                   (side == 'short' and current_price >= state['stop_loss']):
+                    logger.info("Closing position %s due to synthetic stop loss", sym)
+                    if self._close_and_log_position(sym, state, current_price, unrealized_pl, 'synthetic_sl'):
+                        del self._position_state[sym]
+                    else:
+                        logger.warning("Synthetic SL close failed; preserving state for retry")
+                    continue
 
-                # 2. Synthetic Take Profit (Partial 1.5R or full if TP is set)
-                # Alpaca allows closing a percentage of the position. We'll close 50% for scale-out.
-                if 'take_profit' in state and not state.get('tp_filled', False):
-                    if (side == 'long' and current_price >= state['take_profit']) or \
-                       (side == 'short' and current_price <= state['take_profit']):
-                        logger.info("Taking partial profit on %s due to synthetic take-profit limit", sym)
-                        if self._close_and_log_position(sym, state, current_price, unrealized_pl, 'synthetic_tp', qty_pct="50"):
-                            state['tp_filled'] = True
-                            state['qty'] = state.get('qty', 0) * 0.5
-                            # We keep tracking it as a runner now.
+            # 2. Synthetic Take Profit
+            if 'take_profit' in state and not state.get('tp_filled', False) and not has_broker_tp:
+                if (side == 'long' and current_price >= state['take_profit']) or \
+                   (side == 'short' and current_price <= state['take_profit']):
+                    logger.info("Taking partial profit on %s due to synthetic take-profit limit", sym)
+                    if self._close_and_log_position(sym, state, current_price, unrealized_pl, 'synthetic_tp', qty_pct="50"):
+                        state['tp_filled'] = True
+                        state['qty'] = state.get('qty', 0) * 0.5
+                        # We keep tracking it as a runner now.
 
             # ── Trailing Stop ──────────────────────────────────────────
             # Use ATR-based trailing if available, else fallback to percentage
@@ -681,7 +730,7 @@ class TradingEngine:
             # Default to equity hours; override for crypto and commodity
             if sym in ("BTCUSD", "ETHUSD", "BCHUSD", "LTCUSD", "UNIUSD", "LINKUSD"):
                 time_stop_hours = config.TIME_STOP_CRYPTO_HOURS
-            elif sym in ("GLD", "USO"):
+            elif sym in ("GLD", "PDBC"):
                 time_stop_hours = config.TIME_STOP_COMMODITY_HOURS
             else:
                 time_stop_hours = config.TIME_STOP_EQUITY_HOURS
@@ -739,13 +788,41 @@ class TradingEngine:
                 f.write(json.dumps(telemetry_data) + "\n")
             # --------------------------------
 
+            # Fetch active orders to look up broker-level TP/SL
+            active_orders_res = self.trader.get_active_orders()
+            active_orders = active_orders_res.get("orders", []) if active_orders_res.get("ok") else []
+            
+            # Map symbol to its active stop and limit prices
+            broker_exits = {}
+            for o in active_orders:
+                sym = o.get("symbol")
+                if not sym: continue
+                otype = o.get("type", "")
+                if otype == "stop":
+                    broker_exits.setdefault(sym, {})["stop"] = o.get("stop_price")
+                elif otype == "limit":
+                    broker_exits.setdefault(sym, {})["limit"] = o.get("limit_price")
+
             for pos in positions:
+                sym = pos.get("symbol", "?")
+                st = self._position_state.get(sym, {})
+                
+                # Use broker-level orders if present, otherwise fall back to internal tracker
+                exits = broker_exits.get(sym, {})
+                sl = exits.get("stop") if "stop" in exits else st.get("stop_loss")
+                tp = exits.get("limit") if "limit" in exits else st.get("take_profit")
+                
+                sl_str = f"${sl:.2f}" if sl else "None"
+                tp_str = f"${tp:.2f}" if tp else "None"
+
                 logger.info(
-                    "  Position: %s %s qty=%.2f P&L=$%.2f",
+                    "  Position: %s %s qty=%.2f P&L=$%.2f | SL: %s | TP: %s",
                     pos.get("side", "?").upper(),
-                    pos.get("symbol", "?"),
+                    sym,
                     pos.get("qty", 0),
                     pos.get("unrealized_pl", 0),
+                    sl_str,
+                    tp_str,
                 )
 
             logger.info(

@@ -50,3 +50,6 @@ claude.md
 codex.md
 overnight_signals.jsonl
 overnight_equity_tracker.jsonl
+*.db
+makeshift.db-wal
+makeshift.db-shm

@@ -162,7 +162,7 @@ except ValueError:
     raise ValueError("TP_RSI_PERIOD must be a valid integer")
 
 try:
-    TP_VOL_SPIKE_MULT = float(os.getenv("TP_VOL_SPIKE_MULT", "1.1"))
+    TP_VOL_SPIKE_MULT = float(os.getenv("TP_VOL_SPIKE_MULT", "0.5"))
 except ValueError:
     raise ValueError("TP_VOL_SPIKE_MULT must be a valid number")
 
@@ -183,18 +183,18 @@ except ValueError:
     raise ValueError("MR_RSI_PERIOD must be a valid integer")
 
 try:
-    MR_RSI_OVERSOLD = float(os.getenv("MR_RSI_OVERSOLD", "25"))
+    MR_RSI_OVERSOLD = float(os.getenv("MR_RSI_OVERSOLD", "20"))
 except ValueError:
     raise ValueError("MR_RSI_OVERSOLD must be a valid number")
 
 try:
-    MR_RSI_OVERBOUGHT = float(os.getenv("MR_RSI_OVERBOUGHT", "75"))
+    MR_RSI_OVERBOUGHT = float(os.getenv("MR_RSI_OVERBOUGHT", "80"))
 except ValueError:
     raise ValueError("MR_RSI_OVERBOUGHT must be a valid number")
 
 # ── Momentum Breakout Strategy (BTC — 1h) ────────────────────────────────────
 try:
-    MB_DONCHIAN_PERIOD = int(os.getenv("MB_DONCHIAN_PERIOD", "48"))
+    MB_DONCHIAN_PERIOD = int(os.getenv("MB_DONCHIAN_PERIOD", "2"))
 except ValueError:
     raise ValueError("MB_DONCHIAN_PERIOD must be a valid integer")
 
@@ -208,7 +208,7 @@ try:
 except ValueError:
     raise ValueError("MB_ATR_TARGET_MULT must be a valid number")
 
-# ── Trend Following Strategy (GLD, USO — 4h) ─────────────────────────────────
+# ── Trend Following Strategy (GLD, PDBC — 4h) ─────────────────────────────────
 try:
     TF_EMA_FAST = int(os.getenv("TF_EMA_FAST", "20"))
 except ValueError:
@@ -229,7 +229,7 @@ ML_VETO_ENABLED = os.getenv("ML_VETO_ENABLED", "true").lower() == "true"
 
 # ── Cooldown / Anti-Whipsaw ───────────────────────────────────────────────────
 try:
-    SIGNAL_COOLDOWN_SECONDS = int(os.getenv("SIGNAL_COOLDOWN_SECONDS", "1800"))
+    SIGNAL_COOLDOWN_SECONDS = int(os.getenv("SIGNAL_COOLDOWN_SECONDS", "0"))
 except ValueError:
     raise ValueError("SIGNAL_COOLDOWN_SECONDS must be a valid integer")
 
@@ -255,7 +255,7 @@ except ValueError:
     raise ValueError("MR_STOCH_RSI_OVERBOUGHT must be a valid number")
 
 try:
-    MR_VOL_SPIKE_MULT = float(os.getenv("MR_VOL_SPIKE_MULT", "1.0"))
+    MR_VOL_SPIKE_MULT = float(os.getenv("MR_VOL_SPIKE_MULT", "0.0"))
 except ValueError:
     raise ValueError("MR_VOL_SPIKE_MULT must be a valid number")
 
@@ -276,12 +276,12 @@ except ValueError:
     raise ValueError("MB_SQUEEZE_KC_MULT must be a valid number")
 
 try:
-    MB_FALSE_BREAKOUT_BARS = int(os.getenv("MB_FALSE_BREAKOUT_BARS", "3"))
+    MB_FALSE_BREAKOUT_BARS = int(os.getenv("MB_FALSE_BREAKOUT_BARS", "1"))
 except ValueError:
     raise ValueError("MB_FALSE_BREAKOUT_BARS must be a valid integer")
 
 try:
-    MB_MIN_VOLUME_RATIO = float(os.getenv("MB_MIN_VOLUME_RATIO", "1.0"))
+    MB_MIN_VOLUME_RATIO = float(os.getenv("MB_MIN_VOLUME_RATIO", "0.1"))
 except ValueError:
     raise ValueError("MB_MIN_VOLUME_RATIO must be a valid number")
 
@@ -297,12 +297,12 @@ except ValueError:
     raise ValueError("MB_ATR_PERCENTILE_LOOKBACK must be a valid integer")
 
 try:
-    MB_COMPRESSION_THRESHOLD = float(os.getenv("MB_COMPRESSION_THRESHOLD", "60.0"))
+    MB_COMPRESSION_THRESHOLD = float(os.getenv("MB_COMPRESSION_THRESHOLD", "0.0"))
 except ValueError:
     raise ValueError("MB_COMPRESSION_THRESHOLD must be a valid number")
 
 try:
-    MB_EXPANSION_VOLUME_RATIO = float(os.getenv("MB_EXPANSION_VOLUME_RATIO", "1.5"))
+    MB_EXPANSION_VOLUME_RATIO = float(os.getenv("MB_EXPANSION_VOLUME_RATIO", "0.1"))
 except ValueError:
     raise ValueError("MB_EXPANSION_VOLUME_RATIO must be a valid number")
 
@@ -318,7 +318,7 @@ except ValueError:
     raise ValueError("TF_ADX_PERIOD must be a valid integer")
 
 try:
-    TF_ADX_MIN_STRENGTH = float(os.getenv("TF_ADX_MIN_STRENGTH", "20.0"))
+    TF_ADX_MIN_STRENGTH = float(os.getenv("TF_ADX_MIN_STRENGTH", "25.0"))
 except ValueError:
     raise ValueError("TF_ADX_MIN_STRENGTH must be a valid number")
 
@@ -472,7 +472,7 @@ for _name, _val, _label in [
     ("MB_COMPRESSION_THRESHOLD", MB_COMPRESSION_THRESHOLD, ">= 0"),
     ("MB_EXPANSION_VOLUME_RATIO", MB_EXPANSION_VOLUME_RATIO, "> 0"),
     ("MB_PARTIAL_TP_RISK_MULT", MB_PARTIAL_TP_RISK_MULT, "> 0"),
-    ("MR_VOL_SPIKE_MULT", MR_VOL_SPIKE_MULT, "> 0"),
+    ("MR_VOL_SPIKE_MULT", MR_VOL_SPIKE_MULT, ">= 0"),
     ("TF_EMA_FAST", TF_EMA_FAST, ">= 2"),
     ("TF_EMA_SLOW", TF_EMA_SLOW, ">= 2"),
     ("TF_ATR_TARGET_MULT", TF_ATR_TARGET_MULT, "> 0"),
@@ -499,23 +499,23 @@ REGIME_PROFILES = {
     "Equity": {
         "Bullish Calm": {
             "AI_RISK_MULTIPLIER_EQUITY": 1.0,
-            "MR_RSI_OVERSOLD": 30.0,
-            "MR_RSI_OVERBOUGHT": 70.0,
+            "MR_RSI_OVERSOLD": 40.0,
+            "MR_RSI_OVERBOUGHT": 60.0,
         },
         "Bullish Volatile": {
             "AI_RISK_MULTIPLIER_EQUITY": 0.8,
-            "MR_RSI_OVERSOLD": 25.0,
-            "MR_RSI_OVERBOUGHT": 75.0,
+            "MR_RSI_OVERSOLD": 35.0,
+            "MR_RSI_OVERBOUGHT": 65.0,
         },
         "Bearish Chop": {
             "AI_RISK_MULTIPLIER_EQUITY": 0.5,
-            "MR_RSI_OVERSOLD": 20.0,
-            "MR_RSI_OVERBOUGHT": 80.0,
+            "MR_RSI_OVERSOLD": 30.0,
+            "MR_RSI_OVERBOUGHT": 70.0,
         },
         "Bearish Volatile": {
             "AI_RISK_MULTIPLIER_EQUITY": 0.5,
-            "MR_RSI_OVERSOLD": 15.0,
-            "MR_RSI_OVERBOUGHT": 85.0,
+            "MR_RSI_OVERSOLD": 25.0,
+            "MR_RSI_OVERBOUGHT": 75.0,
         },
     },
     "Crypto": {

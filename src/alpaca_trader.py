@@ -39,6 +39,7 @@ from alpaca.trading.requests import (
 )
 
 import config
+from src.database import log_trade
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ TICKER_MAP: Dict[str, str] = {
     "YM=F":    "DIA",     # Dow Jones futures   → SPDR DJIA ETF
     "RTY=F":   "IWM",     # Russell 2000 futures→ iShares Russell 2000 ETF
     "GC=F":    "GLD",     # Gold futures        → SPDR Gold Shares ETF
-    "CL=F":    "USO",     # Crude oil futures   → United States Oil ETF
+    "CL=F":    "PDBC",     # Crude oil/Commodities futures -> PDBC
     "BTC-USD": "BTCUSD",  # Bitcoin             → BTC/USD crypto pair
     "ETH-USD": "ETHUSD",  # Ethereum            → ETH/USD crypto pair
 }
@@ -63,7 +64,7 @@ CRYPTO_SYMBOLS: set = {"BTCUSD", "ETHUSD", "BCHUSD", "LTCUSD", "UNIUSD", "LINKUS
 INITIAL_CASH_LIMIT: float = 5_000.0
 
 # Minimum R/R the double-check validator enforces.
-MIN_RR_HARD: float = 1.5
+MIN_RR_HARD: float = 1.0
 
 # Maximum entry-vs-current-price deviation (%) before rejecting the order.
 MAX_ENTRY_DEVIATION_PCT: float = 2.0
@@ -824,9 +825,17 @@ class AlpacaTrader:
         # over the weekend to protect open swing/trend positions. 
         # (The Market Hours guard in engine.py prevents entry market orders from queuing overnight)
         tif = TimeInForce.GTC
+        
+        is_ext_hours = False
+        if not is_crypto and is_limit:
+            try:
+                clock = self._client.get_clock()
+                is_ext_hours = not clock.is_open
+            except Exception:
+                pass
 
         # ── Scale-out: split into two bracket orders (half size each) ──────────
-        if config.SCALE_OUT_ENABLED and not is_crypto:
+        if config.SCALE_OUT_ENABLED and not is_crypto and not is_ext_hours:
             try:
                 qty = max(1, int(notional / max(entry, 0.01)))
                 half_qty = max(1, qty // 2)
@@ -873,6 +882,17 @@ class AlpacaTrader:
                         order_class=OrderClass.SIMPLE,
                         limit_price=round(entry, 2),
                         qty=qty,
+                    )
+                elif is_ext_hours:
+                    # Extended Hours: bracket not supported, use simple limit with extended_hours=True
+                    req = LimitOrderRequest(
+                        symbol=alpaca_ticker,
+                        side=order_side,
+                        time_in_force=tif,
+                        order_class=OrderClass.SIMPLE,
+                        limit_price=round(entry, 2),
+                        qty=qty,
+                        extended_hours=True,
                     )
                 else:
                     # Equity: bracket limit order with SL/TP
@@ -1101,6 +1121,64 @@ class AlpacaTrader:
             worked, reason, exit_price = self._finalize_reason_from_order(order, rec.get("side", "BUY"))
             entry_price = float(rec.get("entry", 0.0) or 0.0)
             side = str(rec.get("side", "BUY")).upper()
+
+            # ── NEW: Bracket entry-fill guard ────────────────────────────
+            # Bracket orders enter "filled" when the entry fills, but
+            # the trade isn't complete until a TP/SL leg fills.
+            # Don't settle prematurely — wait for the leg to fill.
+            order_class = getattr(order, "order_class", None)
+            is_bracket = order_class is not None and "bracket" in str(order_class).lower()
+            if is_bracket and reason == "filled_simple":
+                continue
+
+            # Skip DB logging if _close_and_log_position already handled it
+            skip_db_log = rec.get("db_logged", False)
+
+            # ── NEW: Log bracket completions to trade_log DB ─────────────
+            if not skip_db_log and is_bracket and reason in ("take_profit_hit", "stop_loss_hit"):
+                _exit_price = exit_price or 0.0
+                _qty = max(float(getattr(order, "filled_qty", 0) or 0), 0)
+                _pnl = 0.0
+                notional_val = float(rec.get("notional", 0.0) or 0.0)
+                if _exit_price > 0 and entry_price > 0:
+                    signed = (_exit_price - entry_price) / entry_price
+                    if side == "SELL":
+                        signed *= -1.0
+                    _pnl = notional_val * signed
+
+                stop_loss = float(rec.get("stop_loss", 0.0) or 0.0)
+                take_profit = float(rec.get("take_profit", 0.0) or 0.0)
+
+                if reason == "take_profit_hit":
+                    _mfe = abs(take_profit - entry_price)
+                    _mae = 0.0
+                else:
+                    _mfe = 0.0
+                    _mae = abs(entry_price - stop_loss)
+
+                sub_ts = float(rec.get("submitted_ts", time.time()))
+                _hold = max((time.time() - sub_ts) / 3600.0, 0.0)
+                meta = rec.get("metadata") or {}
+
+                try:
+                    log_trade(
+                        symbol=rec.get("symbol", ""),
+                        strategy=meta.get("strategy", "unknown"),
+                        direction=side,
+                        entry_price=entry_price,
+                        exit_price=_exit_price,
+                        stop_loss=stop_loss,
+                        qty=_qty if _qty > 0 else max(1, int(notional_val / max(entry_price, 0.01))),
+                        pnl=_pnl,
+                        mfe=_mfe,
+                        mae=_mae,
+                        hold_hours=_hold,
+                        exit_reason=reason,
+                        regime=meta.get("regime", "unknown"),
+                    )
+                except Exception as e:
+                    logger.error("Failed to log bracket fill to DB for %s: %s", rec.get("symbol"), e)
+
             pnl_pct = 0.0
             if exit_price and entry_price > 0:
                 signed = (exit_price - entry_price) / entry_price

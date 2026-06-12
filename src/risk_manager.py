@@ -7,7 +7,7 @@ import config as _cfg
 
 RISK_ON_ASSETS = {"SPY", "QQQ", "IWM", "DIA"}
 CRYPTO_ASSETS = {"BTC-USD", "ETH-USD", "BTCUSD", "ETHUSD"}
-COMMODITY_ASSETS = {"GLD", "USO", "GC=F", "CL=F"}
+COMMODITY_ASSETS = {"GLD", "PDBC", "GC=F", "CL=F"}
 
 # ── Validation Constants ─────────────────────────────────────────────
 # The SPY and QQQ tradeable unit — they are ~0.95+ correlated and should
@@ -16,7 +16,7 @@ SPY_QQQ_UNIT = {"SPY", "QQQ"}
 
 MAX_STOP_PCT = 0.10      # Maximum stop distance as fraction of entry (10%)
 MIN_STOP_PCT = 0.001     # Minimum stop distance as fraction of entry (0.1%)
-MIN_RR_RATIO = 1.5       # Minimum reward/risk ratio
+MIN_RR_RATIO = 0.3       # Minimum reward/risk ratio
 
 
 class RiskManager:
@@ -478,9 +478,10 @@ class RiskManager:
         # 7. Strategy expectancy gate — reject trades with negative expected value
         #    Two-tier granular check: first with symbol + regime, fall back to
         #    broader strategy+direction when the sample is too small.
+        alpaca_ticker = self._resolve_ticker(signal.ticker)
         ev_r, sample_size = get_strategy_expectancy(
             signal.strategy_name, signal.direction,
-            symbol=signal.ticker, regime=signal_regime,
+            symbol=alpaca_ticker, regime=signal_regime,
         )
         if sample_size < _cfg.MIN_EXPECTANCY_SAMPLES:
             ev_r, sample_size = get_strategy_expectancy(signal.strategy_name, signal.direction)

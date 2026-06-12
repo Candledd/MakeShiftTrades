@@ -58,12 +58,12 @@ logger = logging.getLogger(__name__)
 # Training configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-TRAIN_SYMBOLS  = ["SPY", "QQQ", "IWM", "GLD", "TLT", "ES=F", "NQ=F", "BTC-USD", "ETH-USD"]
+TRAIN_SYMBOLS  = ["SPY", "QQQ", "IWM", "GLD", "TLT", "BTC-USD", "ETH-USD"]
 TRAIN_PERIOD   = "2y"
 TRAIN_INTERVAL = "1d"
 FWD_BARS       = 3           # forward bars used for up/down label
 TRAIN_SPLIT    = 0.80        # chronological train/validation split per symbol
-MIN_ROWS       = 120         # minimum clean rows per symbol to keep
+MIN_ROWS       = 30         # minimum clean rows per symbol to keep
 MIN_CAL_ROWS   = 150         # minimum total validation rows for calibration
 FEEDBACK_FILE  = Path(__file__).resolve().parent.parent / "trade_feedback.jsonl"
 FEEDBACK_MAX_ROWS = 3000

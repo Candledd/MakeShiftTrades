@@ -1490,24 +1490,30 @@ async function refreshBotBrokerState() {
 
     // Render Positions
     const posTable = document.getElementById('bot-positions-table');
-    if (data.positions && data.positions.length > 0) {
-      posTable.innerHTML = data.positions.map(pos => {
-        const sideColor = pos.side.toLowerCase() === 'long' || pos.side.toLowerCase() === 'buy' ? 'var(--bull)' : 'var(--bear)';
-        const pnlColor = pos.unrealized_pl >= 0 ? 'var(--bull)' : 'var(--bear)';
-        const pnlSign = pos.unrealized_pl >= 0 ? '+' : '';
-        return `
-          <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
-            <td style="padding: 8px 4px; font-weight: 600;">${pos.symbol}</td>
-            <td style="padding: 8px 4px; color: ${sideColor}; font-weight: bold; text-transform: uppercase;">${pos.side}</td>
-            <td style="padding: 8px 4px; text-align: right;">${pos.qty}</td>
-            <td style="padding: 8px 4px; text-align: right;">$${pos.avg_entry_price.toFixed(2)}</td>
-            <td style="padding: 8px 4px; text-align: right; color: ${pnlColor}; font-weight: bold;">${pnlSign}$${pos.unrealized_pl.toFixed(2)}</td>
-          </tr>
-        `;
-      }).join('');
-    } else {
-      posTable.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--muted); padding: 20px 0;">No active positions</td></tr>`;
-    }
+      if (data.positions && data.positions.length > 0) {
+        posTable.innerHTML = data.positions.map(pos => {
+          const sideColor = pos.side.toLowerCase() === 'long' || pos.side.toLowerCase() === 'buy' ? 'var(--bull)' : 'var(--bear)';
+          const pnlColor = pos.unrealized_pl >= 0 ? 'var(--bull)' : 'var(--bear)';
+          const pnlSign = pos.unrealized_pl >= 0 ? '+' : '';
+          
+          const slStr = pos.stop_loss ? `$${pos.stop_loss.toFixed(2)}` : '—';
+          const tpStr = pos.take_profit ? `$${pos.take_profit.toFixed(2)}` : '—';
+          
+          return `
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
+              <td style="padding: 8px 4px; font-weight: 600;">${pos.symbol}</td>
+              <td style="padding: 8px 4px; color: ${sideColor}; font-weight: bold; text-transform: uppercase;">${pos.side}</td>
+              <td style="padding: 8px 4px; text-align: right;">${pos.qty}</td>
+              <td style="padding: 8px 4px; text-align: right;">$${pos.avg_entry_price.toFixed(2)}</td>
+              <td style="padding: 8px 4px; text-align: right;">${slStr}</td>
+              <td style="padding: 8px 4px; text-align: right;">${tpStr}</td>
+              <td style="padding: 8px 4px; text-align: right; color: ${pnlColor}; font-weight: bold;">${pnlSign}$${pos.unrealized_pl.toFixed(2)}</td>
+            </tr>
+          `;
+        }).join('');
+      } else {
+        posTable.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--muted); padding: 20px 0;">No active positions</td></tr>`;
+      }
 
     // Render Orders
     const ordTable = document.getElementById('bot-orders-table');
