@@ -15,8 +15,9 @@ from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum_breakout import MomentumBreakoutStrategy
 from src.strategies.trend_pullback import TrendPullbackStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
-from charts.data import fetch_ohlcv
-from src.backtester import simulate_trade
+
+from ml_optimizer import run_backtest_session
+import ml_optimizer
 
 # Suppress debug logging during backtest to keep console clean
 logging.basicConfig(level=logging.CRITICAL, format='%(message)s')
@@ -49,86 +50,36 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
     print(f"Assuming ${account_size:,.0f} starting capital | {risk_pct}% Risk per Trade (${account_size * (risk_pct/100):.2f})")
     print("=" * 70)
     
-    configs = [
+    configs_strat = [
         ("SPY", "15m", MeanReversionStrategy()),
         ("QQQ", "15m", MeanReversionStrategy()),
         ("SPY", "15m", TrendPullbackStrategy()),
         ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy()),
-        ("GLD", "4h", TrendFollowingStrategy()),
-        ("PDBC", "4h", TrendFollowingStrategy())
+        ("BTC-USD", "1h", MomentumBreakoutStrategy())
     ]
     
-    total_signals = 0
-    total_wins = 0
-    total_losses = 0
-    total_pnl = 0.0
+    ml_optimizer.load_data(months=months)
     
-    RISK_DOLLARS = account_size * (risk_pct / 100.0)
+    total_pnl, total_signals, pnl_by_ticker, pnl_by_strategy, trades = run_backtest_session(
+        configs_strat, is_oos_mode="IS", account_size=account_size, risk_pct=risk_pct
+    )
     
-    for ticker, tf, strategy in configs:
-        print(f"\nTesting {ticker} ({tf})...")
-        # Fetch extra time to avoid warmup bias
-        df = fetch_ohlcv(ticker, period=f"{months+1}mo", interval=tf)
-        if df is None or len(df) < 200:
-            print(f"  [!] Insufficient data for {ticker}")
-            continue
-            
-        last_timestamp = df.index[-1]
-        start_date = last_timestamp - timedelta(days=30 * months)
-        test_start_idx = df.index.get_indexer([start_date], method='bfill')[0]
-        
-        ticker_signals = 0
-        ticker_wins = 0
-        ticker_losses = 0
-        ticker_pnl = 0.0
-        
-        # Reset internal cooldowns ONCE per ticker
-        strategy._last_signal_time = {} 
-        
-        for i in range(test_start_idx, len(df) - 1):
-            window_df = df.iloc[:i+1]
-            
-            signal = strategy.analyze(window_df, ticker)
-            if signal:
-                outcome, exit_price, bars, pnl_per_share = simulate_trade(df, i, signal)
-                if outcome == 'NO_FILL':
-                    continue
-                
-                ticker_signals += 1
-                
-                # Calculate PnL mathematically based on standard Risk/Reward principles
-                risk_per_share = abs(signal.entry - signal.stop_loss)
-                if risk_per_share == 0: continue
-                
-                qty = RISK_DOLLARS / risk_per_share
-                max_qty = account_size / signal.entry
-                qty = min(qty, max_qty)
-                
-                trade_pnl = pnl_per_share * qty
-                ticker_pnl += trade_pnl
-                
-                if outcome == 'TP' or outcome == 'TRAIL_SL' or trade_pnl > 0: 
-                    ticker_wins += 1
-                elif outcome == 'SL' or trade_pnl < 0: 
-                    ticker_losses += 1
-                    
-        total_signals += ticker_signals
-        total_wins += ticker_wins
-        total_losses += ticker_losses
-        total_pnl += ticker_pnl
-        
-        win_rate = (ticker_wins / (ticker_wins + ticker_losses) * 100) if (ticker_wins + ticker_losses) > 0 else 0
-        print(f"  {ticker} Summary: {ticker_signals} signals | Win Rate: {win_rate:.1f}%")
-        print(f"  {ticker} Net PnL: ${ticker_pnl:+.2f}")
-
-    print("-" * 70)
-    total_closed = total_wins + total_losses
-    overall_win_rate = (total_wins / total_closed * 100) if total_closed > 0 else 0
-    print(f"TOTAL SIGNALS : {total_signals}")
-    print(f"OVERALL WIN RATE: {overall_win_rate:.1f}% ({total_wins}W {total_losses}L)")
-    print(f"TOTAL NET PnL : ${total_pnl:+.2f}")
-    print("=" * 70)
-
+    print("\n" + "="*50)
+    print(f"6-MONTH RAW PNL BACKTEST (Account: ${account_size:,.2f})")
+    print("="*50)
+    print(f"Total Trades: {total_signals}")
+    print(f"Total Net PnL: ${total_pnl:,.2f}")
+    print("-"*50)
+    print("PnL by Ticker:")
+    for ticker, pnl in pnl_by_ticker.items():
+        if pnl != 0.0 or ticker in ["SPY", "QQQ", "BTC-USD"]:
+            print(f"  {ticker:<8}: ${pnl:,.2f}")
+    print("-"*50)
+    print("PnL by Strategy:")
+    for strat, pnl in pnl_by_strategy.items():
+        if pnl != 0.0 or strat in ["mean_reversion", "trend_pullback", "momentum_breakout"]:
+            print(f"  {strat:<18}: ${pnl:,.2f}")
+    print("="*50)
+    
 if __name__ == "__main__":
     run_pnl_backtest()

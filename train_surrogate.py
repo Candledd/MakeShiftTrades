@@ -89,9 +89,9 @@ def train_surrogate():
     X_virt = pd.DataFrame(random_samples)
     
     # Predict individually and sum for Total PnL
-    X_virt['Predicted_MR'] = model_mr.predict(X_virt)
-    X_virt['Predicted_TP'] = model_tp.predict(X_virt)
-    X_virt['Predicted_MB'] = model_mb.predict(X_virt)
+    X_virt['Predicted_MR'] = model_mr.predict(X_virt[X.columns])
+    X_virt['Predicted_TP'] = model_tp.predict(X_virt[X.columns])
+    X_virt['Predicted_MB'] = model_mb.predict(X_virt[X.columns])
     X_virt['Predicted_PnL'] = X_virt['Predicted_MR'] + X_virt['Predicted_TP'] + X_virt['Predicted_MB']
     
     best_virtual = X_virt.sort_values(by='Predicted_PnL', ascending=False).head(5)

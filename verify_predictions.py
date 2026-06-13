@@ -37,23 +37,26 @@ def simulate_trade(df, entry_idx, signal):
             if row['Low'] <= signal.take_profit: return 'TP', signal.take_profit
     return 'OPEN', future_df["Close"].iloc[-1] if len(future_df) > 0 else signal.entry
 
+from ml_optimizer import run_backtest_session
+import ml_optimizer
+
 def test_params(params):
     # Apply params
-    config.MB_ADX_THRESHOLD = params["MB_ADX_THRESHOLD"]
-    config.MB_DONCHIAN_PERIOD = int(params["MB_DONCHIAN_PERIOD"])
-    config.MB_FALSE_BREAKOUT_BARS = int(params["MB_FALSE_BREAKOUT_BARS"])
-    config.MR_BB_PERIOD = int(params["MR_BB_PERIOD"])
-    config.MR_BB_STD = params["MR_BB_STD"]
-    config.MR_RSI_OVERBOUGHT = params["MR_RSI_OVERBOUGHT"]
-    config.MR_RSI_OVERSOLD = params["MR_RSI_OVERSOLD"]
-    config.MR_RSI_PERIOD = int(params["MR_RSI_PERIOD"])
-    config.MR_STOP_MULT = params["MR_STOP_MULT"]
-    config.TP_BB_PERIOD = int(params["TP_BB_PERIOD"])
-    config.TP_BB_STD = params["TP_BB_STD"]
-    config.TP_PULLBACK_BUFFER = params["TP_PULLBACK_BUFFER"]
-    config.TP_STOP_MULT = params["TP_STOP_MULT"]
+    config.MB_ADX_THRESHOLD = params.get("MB_ADX_THRESHOLD", config.MB_ADX_THRESHOLD)
+    config.MB_DONCHIAN_PERIOD = int(params.get("MB_DONCHIAN_PERIOD", config.MB_DONCHIAN_PERIOD))
+    config.MB_FALSE_BREAKOUT_BARS = int(params.get("MB_FALSE_BREAKOUT_BARS", getattr(config, "MB_FALSE_BREAKOUT_BARS", 5)))
+    config.MR_BB_PERIOD = int(params.get("MR_BB_PERIOD", config.MR_BB_PERIOD))
+    config.MR_BB_STD = params.get("MR_BB_STD", config.MR_BB_STD)
+    config.MR_RSI_OVERBOUGHT = params.get("MR_RSI_OVERBOUGHT", config.MR_RSI_OVERBOUGHT)
+    config.MR_RSI_OVERSOLD = params.get("MR_RSI_OVERSOLD", config.MR_RSI_OVERSOLD)
+    config.MR_RSI_PERIOD = int(params.get("MR_RSI_PERIOD", config.MR_RSI_PERIOD))
+    config.MR_STOP_MULT = params.get("MR_STOP_MULT", config.MR_STOP_MULT)
+    config.TP_BB_PERIOD = int(params.get("TP_BB_PERIOD", config.TP_BB_PERIOD))
+    config.TP_BB_STD = params.get("TP_BB_STD", config.TP_BB_STD)
+    config.TP_PULLBACK_BUFFER = params.get("TP_PULLBACK_BUFFER", config.TP_PULLBACK_BUFFER)
+    config.TP_STOP_MULT = params.get("TP_STOP_MULT", config.TP_STOP_MULT)
     
-    # Add new R/R parameters gracefully (in case old json is used)
+    # Add new R/R parameters gracefully
     config.MR_TP_TARGET_MULT = params.get("MR_TP_TARGET_MULT", getattr(config, 'MR_TP_TARGET_MULT', 1.0))
     config.MR_MIN_RR = params.get("MR_MIN_RR", getattr(config, 'MR_MIN_RR', 1.0))
     config.TP_MIN_RR = params.get("TP_MIN_RR", getattr(config, 'TP_MIN_RR', 1.2))
@@ -66,35 +69,9 @@ def test_params(params):
         ("BTC-USD", "1h", MomentumBreakoutStrategy())
     ]
     
-    total_pnl = 0.0
-    total_signals = 0
-    RISK_DOLLARS = 50.0  # 1% of 5000
-    
-    for ticker, tf, strategy in strats:
-        df = DATA_CACHE.get((ticker, tf))
-        if df is None: continue
-        
-        start_date = df.index[-1] - timedelta(days=90)
-        test_start_idx = df.index.get_indexer([start_date], method='bfill')[0]
-        
-        for i in range(test_start_idx, len(df) - 1):
-            strategy._last_signal_time = {} 
-            signal = strategy.analyze(df.iloc[:i+1], ticker)
-            if signal:
-                total_signals += 1
-                outcome, exit_price = simulate_trade(df, i, signal)
-                risk_per_share = abs(signal.entry - signal.stop_loss)
-                if risk_per_share == 0: continue
-                qty = RISK_DOLLARS / risk_per_share
-                max_qty = 5000.0 / signal.entry
-                qty = min(qty, max_qty)
-                
-                # Transaction friction penalty
-                trade_pnl = (exit_price - signal.entry) * qty if signal.direction == 'BUY' else (signal.entry - exit_price) * qty
-                trade_pnl -= (signal.entry * qty * 0.00025) + (exit_price * qty * 0.00025)
-                
-                total_pnl += trade_pnl
-                
+    total_pnl, total_signals, pnl_by_ticker, pnl_by_strategy, trades = run_backtest_session(
+        strats, is_oos_mode="IS", account_size=5000.0, risk_pct=1.0
+    )
     return total_pnl, total_signals
 
 if __name__ == "__main__":
@@ -108,6 +85,7 @@ if __name__ == "__main__":
         sets = json.load(f)
         
     print("Loading data for cache... (this takes a few seconds)")
+    ml_optimizer.load_data(months=6)
     load_data()
     
     print(f"\n{'Set':<8} | {'Predicted PnL':<15} | {'Actual PnL':<15} | {'Trades':<10}")

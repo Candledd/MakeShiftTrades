@@ -35,9 +35,9 @@ def load_data(months=6):
     configs = [
         ("SPY", "15m"),
         ("QQQ", "15m"),
-        ("BTC-USD", "1h"),
-        ("GLD", "4h"),
-        ("PDBC", "4h")
+        ("BTC-USD", "1h")
+        # ("GLD", "4h"),
+        # ("PDBC", "4h")
     ]
     for ticker, tf in configs:
         df = fetch_ohlcv(ticker, period=f"{months+1}mo", interval=tf)
@@ -225,9 +225,9 @@ def objective(trial):
     mr_min_rr = trial.suggest_float("MR_MIN_RR", 0.5, 2.5, step=0.1)
     tp_min_rr = trial.suggest_float("TP_MIN_RR", 0.8, 3.0, step=0.1)
 
-    tf_ema_fast = trial.suggest_int("TF_EMA_FAST", 10, 25)
-    tf_ema_slow = trial.suggest_int("TF_EMA_SLOW", 40, 60)
-    tf_atr_target_mult = trial.suggest_float("TF_ATR_TARGET_MULT", 2.0, 5.0, step=0.1)
+    # tf_ema_fast = trial.suggest_int("TF_EMA_FAST", 10, 25)
+    # tf_ema_slow = trial.suggest_int("TF_EMA_SLOW", 40, 60)
+    # tf_atr_target_mult = trial.suggest_float("TF_ATR_TARGET_MULT", 2.0, 5.0, step=0.1)
     
     # Apply parameters to config
     config.MR_BB_STD = mr_bb_std
@@ -249,32 +249,32 @@ def objective(trial):
     config.MR_MIN_RR = mr_min_rr
     config.TP_MIN_RR = tp_min_rr
 
-    config.GLD_EMA_FAST = tf_ema_fast
-    config.PDBC_EMA_FAST = tf_ema_fast
-    config.TF_EMA_SLOW = tf_ema_slow
-    config.TF_ATR_TARGET_MULT = tf_atr_target_mult
+    # config.GLD_EMA_FAST = tf_ema_fast
+    # config.PDBC_EMA_FAST = tf_ema_fast
+    # config.TF_EMA_SLOW = tf_ema_slow
+    # config.TF_ATR_TARGET_MULT = tf_atr_target_mult
 
-    # ── GLD-specific tuning parameters ────────────────────────────────
-    gld_stop_mult = trial.suggest_float("GLD_STOP_MULT", 2.0, 4.0, step=0.1)
-    gld_trend_filter = trial.suggest_categorical("GLD_TREND_FILTER", ["HTF", "ADX", "BOTH"])
-    gld_pullback_trigger = trial.suggest_categorical("GLD_PULLBACK_TRIGGER", ["enabled", "disabled"])
+    # ⛏️ GLD-specific tuning parameters ⛏️
+    # gld_stop_mult = trial.suggest_float("GLD_STOP_MULT", 2.0, 4.0, step=0.1)
+    # gld_trend_filter = trial.suggest_categorical("GLD_TREND_FILTER", ["HTF", "ADX", "BOTH"])
+    # gld_pullback_trigger = trial.suggest_categorical("GLD_PULLBACK_TRIGGER", ["enabled", "disabled"])
 
-    # ── PDBC-specific tuning parameters ───────────────────────────────
-    pdbc_stop_mult = trial.suggest_float("PDBC_STOP_MULT", 2.0, 4.0, step=0.1)
-    pdbc_adx_min = trial.suggest_float("PDBC_ADX_MIN", 20.0, 30.0, step=1.0)
-    pdbc_range_expansion_threshold = trial.suggest_float(
-        "PDBC_RANGE_EXPANSION_THRESHOLD", 0.5, 1.0, step=0.05
-    )
+    # 🛢️ PDBC-specific tuning parameters 🛢️
+    # pdbc_stop_mult = trial.suggest_float("PDBC_STOP_MULT", 2.0, 4.0, step=0.1)
+    # pdbc_adx_min = trial.suggest_float("PDBC_ADX_MIN", 20.0, 30.0, step=1.0)
+    # pdbc_range_expansion_threshold = trial.suggest_float(
+    #     "PDBC_RANGE_EXPANSION_THRESHOLD", 0.5, 1.0, step=0.05
+    # )
 
     # Apply GLD parameters to config
-    config.GLD_STOP_MULT = gld_stop_mult
-    config.GLD_TREND_FILTER = gld_trend_filter
-    config.GLD_PULLBACK_TRIGGER = gld_pullback_trigger
+    # config.GLD_STOP_MULT = gld_stop_mult
+    # config.GLD_TREND_FILTER = gld_trend_filter
+    # config.GLD_PULLBACK_TRIGGER = gld_pullback_trigger
 
     # Apply PDBC parameters to config
-    config.PDBC_STOP_MULT = pdbc_stop_mult
-    config.PDBC_ADX_MIN = pdbc_adx_min
-    config.PDBC_RANGE_EXPANSION_THRESHOLD = pdbc_range_expansion_threshold
+    # config.PDBC_STOP_MULT = pdbc_stop_mult
+    # config.PDBC_ADX_MIN = pdbc_adx_min
+    # config.PDBC_RANGE_EXPANSION_THRESHOLD = pdbc_range_expansion_threshold
 
     # Pre-instantiate strategies to save time
     configs_strat = [
@@ -282,9 +282,9 @@ def objective(trial):
         ("QQQ", "15m", MeanReversionStrategy()),
         ("SPY", "15m", TrendPullbackStrategy()),
         ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy()),
-        ("GLD", "4h", TrendFollowingStrategy()),
-        ("PDBC", "4h", TrendFollowingStrategy())
+        ("BTC-USD", "1h", MomentumBreakoutStrategy())
+        # ("GLD", "4h", TrendFollowingStrategy()),
+        # ("PDBC", "4h", TrendFollowingStrategy())
     ]
     
     account_size = 5000.0
@@ -331,27 +331,29 @@ def objective(trial):
         )
 
         # ── Commodity validation: GLD and PDBC ─────────────────────────
+        # '''
         # Hard validation: reject (return -inf) if trade count <= 10
         # or profit factor < 1.2 for either commodity.
-        for com_label in ["GLD", "PDBC"]:
-            com_trades_list = [t for t in trades if t.get('ticker') == com_label]
-            com_count = len(com_trades_list)
-            if com_count > 0:
-                com_gp = sum(t['pnl'] for t in com_trades_list if t['pnl'] > 0)
-                com_gl = abs(sum(t['pnl'] for t in com_trades_list if t['pnl'] < 0))
-                com_pf = com_gp / com_gl if com_gl > 0 else 999.0
-                if com_count <= 10:
-                    return float("-inf")
-                if com_pf < 1.2:
-                    return float("-inf")
+        # for com_label in ["GLD", "PDBC"]:
+        #     com_trades_list = [t for t in trades if t.get('ticker') == com_label]
+        #     com_count = len(com_trades_list)
+        #     if com_count > 0:
+        #         com_gp = sum(t['pnl'] for t in com_trades_list if t['pnl'] > 0)
+        #         com_gl = abs(sum(t['pnl'] for t in com_trades_list if t['pnl'] < 0))
+        #         com_pf = com_gp / com_gl if com_gl > 0 else 999.0
+        #         if com_count <= 10:
+        #             return float("-inf")
+        #         if com_pf < 1.2:
+        #             return float("-inf")
+        # '''
     else:
         score = -1000.0 - (20 - total_signals) * 10
         
     trial.set_user_attr("SPY_PnL", pnl_by_ticker["SPY"])
     trial.set_user_attr("QQQ_PnL", pnl_by_ticker["QQQ"])
     trial.set_user_attr("BTC_PnL", pnl_by_ticker["BTC-USD"])
-    trial.set_user_attr("GLD_PnL", pnl_by_ticker["GLD"])
-    trial.set_user_attr("PDBC_PnL", pnl_by_ticker["PDBC"])
+    # trial.set_user_attr("GLD_PnL", pnl_by_ticker.get("GLD", 0.0))
+    # trial.set_user_attr("PDBC_PnL", pnl_by_ticker.get("PDBC", 0.0))
     trial.set_user_attr("MR_PnL", pnl_by_strategy["mean_reversion"])
     trial.set_user_attr("TP_PnL", pnl_by_strategy["trend_pullback"])
     trial.set_user_attr("MB_PnL", pnl_by_strategy["momentum_breakout"])
@@ -380,36 +382,36 @@ def evaluate_oos_params(best_params):
     config.MR_MIN_RR = best_params.get("MR_MIN_RR", config.MR_MIN_RR)
     config.TP_MIN_RR = best_params.get("TP_MIN_RR", config.TP_MIN_RR)
 
-    if "TF_EMA_FAST" in best_params:
-        config.GLD_EMA_FAST = int(best_params["TF_EMA_FAST"])
-        config.PDBC_EMA_FAST = int(best_params["TF_EMA_FAST"])
-    config.TF_EMA_SLOW = int(best_params.get("TF_EMA_SLOW", config.TF_EMA_SLOW))
-    config.TF_ATR_TARGET_MULT = float(best_params.get("TF_ATR_TARGET_MULT", config.TF_ATR_TARGET_MULT))
+    # if "TF_EMA_FAST" in best_params:
+    #     config.GLD_EMA_FAST = int(best_params["TF_EMA_FAST"])
+    #     config.PDBC_EMA_FAST = int(best_params["TF_EMA_FAST"])
+    # config.TF_EMA_SLOW = int(best_params.get("TF_EMA_SLOW", config.TF_EMA_SLOW))
+    # config.TF_ATR_TARGET_MULT = float(best_params.get("TF_ATR_TARGET_MULT", config.TF_ATR_TARGET_MULT))
 
     # Apply GLD parameters
-    if "GLD_STOP_MULT" in best_params:
-        config.GLD_STOP_MULT = float(best_params["GLD_STOP_MULT"])
-    if "GLD_TREND_FILTER" in best_params:
-        config.GLD_TREND_FILTER = best_params["GLD_TREND_FILTER"]
-    if "GLD_PULLBACK_TRIGGER" in best_params:
-        config.GLD_PULLBACK_TRIGGER = best_params["GLD_PULLBACK_TRIGGER"]
+    # if "GLD_STOP_MULT" in best_params:
+    #     config.GLD_STOP_MULT = float(best_params["GLD_STOP_MULT"])
+    # if "GLD_TREND_FILTER" in best_params:
+    #     config.GLD_TREND_FILTER = best_params["GLD_TREND_FILTER"]
+    # if "GLD_PULLBACK_TRIGGER" in best_params:
+    #     config.GLD_PULLBACK_TRIGGER = best_params["GLD_PULLBACK_TRIGGER"]
 
     # Apply PDBC parameters
-    if "PDBC_STOP_MULT" in best_params:
-        config.PDBC_STOP_MULT = float(best_params["PDBC_STOP_MULT"])
-    if "PDBC_ADX_MIN" in best_params:
-        config.PDBC_ADX_MIN = float(best_params["PDBC_ADX_MIN"])
-    if "PDBC_RANGE_EXPANSION_THRESHOLD" in best_params:
-        config.PDBC_RANGE_EXPANSION_THRESHOLD = float(best_params["PDBC_RANGE_EXPANSION_THRESHOLD"])
+    # if "PDBC_STOP_MULT" in best_params:
+    #     config.PDBC_STOP_MULT = float(best_params["PDBC_STOP_MULT"])
+    # if "PDBC_ADX_MIN" in best_params:
+    #     config.PDBC_ADX_MIN = float(best_params["PDBC_ADX_MIN"])
+    # if "PDBC_RANGE_EXPANSION_THRESHOLD" in best_params:
+    #     config.PDBC_RANGE_EXPANSION_THRESHOLD = float(best_params["PDBC_RANGE_EXPANSION_THRESHOLD"])
     
     configs_strat = [
         ("SPY", "15m", MeanReversionStrategy()),
         ("QQQ", "15m", MeanReversionStrategy()),
         ("SPY", "15m", TrendPullbackStrategy()),
         ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy()),
-        ("GLD", "4h", TrendFollowingStrategy()),
-        ("PDBC", "4h", TrendFollowingStrategy())
+        ("BTC-USD", "1h", MomentumBreakoutStrategy())
+        # ("GLD", "4h", TrendFollowingStrategy()),
+        # ("PDBC", "4h", TrendFollowingStrategy())
     ]
     
     account_size = 5000.0
@@ -426,7 +428,7 @@ if __name__ == "__main__":
     print("Data loaded. Starting Optuna study...")
     
     study = optuna.create_study(
-        study_name="makeshift_trades_6mo",
+        study_name="makeshift_trades_6mo_v3",
         storage="sqlite:///optuna_study.db?timeout=60",
         direction="maximize",
         load_if_exists=True
@@ -443,8 +445,8 @@ if __name__ == "__main__":
     print("SPY PnL:", best_trial.user_attrs.get("SPY_PnL"))
     print("QQQ PnL:", best_trial.user_attrs.get("QQQ_PnL"))
     print("BTC PnL:", best_trial.user_attrs.get("BTC_PnL"))
-    print("GLD PnL:", best_trial.user_attrs.get("GLD_PnL"))
-    print("PDBC PnL:", best_trial.user_attrs.get("PDBC_PnL"))
+    # print("GLD PnL:", best_trial.user_attrs.get("GLD_PnL"))
+    # print("PDBC PnL:", best_trial.user_attrs.get("PDBC_PnL"))
     print("Total Trades:", best_trial.user_attrs.get("Total_Trades"))
     
     print("Evaluating best parameters on Out-Of-Sample (OOS) blind data...")
@@ -454,8 +456,8 @@ if __name__ == "__main__":
     print("OOS SPY PnL:", oos_pnl_by_ticker["SPY"])
     print("OOS QQQ PnL:", oos_pnl_by_ticker["QQQ"])
     print("OOS BTC PnL:", oos_pnl_by_ticker["BTC-USD"])
-    print("OOS GLD PnL:", oos_pnl_by_ticker.get("GLD", 0.0))
-    print("OOS PDBC PnL:", oos_pnl_by_ticker.get("PDBC", 0.0))
+    # print("OOS GLD PnL:", oos_pnl_by_ticker.get("GLD", 0.0))
+    # print("OOS PDBC PnL:", oos_pnl_by_ticker.get("PDBC", 0.0))
     print("=" * 50)
     
     try:
