@@ -33,7 +33,8 @@ class AITuner:
         self.current_regimes = {
             "Equity": "Unknown",
             "Crypto": "Unknown",
-            "Commodity": "Unknown"
+            "Gold": "Unknown",
+            "Broad Commodity": "Unknown"
         }
         self.last_tuned_time = 0
         self.tune_interval = 3600 * 4  # Retune every 4 hours
@@ -57,6 +58,8 @@ class AITuner:
             sma50 = df['sma50'].iloc[-1]
 
             is_bull = sma20 > sma50 and current_close > sma50
+            is_bear = sma20 < sma50 and current_close < sma50
+            is_range = not is_bull and not is_bear
 
             df['tr'] = np.maximum(
                 df['High'] - df['Low'],
@@ -74,7 +77,9 @@ class AITuner:
                 return "Bullish Calm", current_atr_pct
             elif is_bull and is_volatile:
                 return "Bullish Volatile", current_atr_pct
-            elif not is_bull and not is_volatile:
+            elif is_range and not is_volatile:
+                return "Range-Bound Calm", current_atr_pct
+            elif is_bear and not is_volatile:
                 return "Bearish Chop", current_atr_pct
             else:
                 return "Bearish Volatile", current_atr_pct
@@ -137,13 +142,55 @@ class AITuner:
             results["Crypto"] = {"regime": cr_regime, "profile": profile, "atr_pct": cr_atr}
             log_msgs.append(f"CRYPTO: {cr_regime}")
 
-        # 3. COMMODITY SECTOR (GLD) -> impacts Trend Following
-        co_regime, co_atr = self._analyze_asset_regime("GLD", volatile_threshold=1.5)
-        if co_regime:
-            self.current_regimes["Commodity"] = co_regime
-            profile = self._apply_regime_profile("Commodity", co_regime)
-            results["Commodity"] = {"regime": co_regime, "profile": profile, "atr_pct": co_atr}
-            log_msgs.append(f"COM: {co_regime}")
+        # 3. GOLD SECTOR (GLD) -> impacts Trend Following
+        go_regime, go_atr = self._analyze_asset_regime("GLD", volatile_threshold=1.5)
+        if go_regime:
+            # Check macro USD proxy UUP
+            uup_regime, _ = self._analyze_asset_regime("UUP", volatile_threshold=1.5)
+            if uup_regime in ["Bullish Calm", "Bullish Volatile"]:
+                # Penalize GLD regime
+                old_regime = go_regime
+                if go_regime == "Bullish Calm":
+                    go_regime = "Range-Bound Calm"
+                elif go_regime == "Bullish Volatile":
+                    go_regime = "Bearish Chop"
+                elif go_regime == "Range-Bound Calm":
+                    go_regime = "Bearish Chop"
+                elif go_regime == "Bearish Chop":
+                    go_regime = "Bearish Volatile"
+                logger.info(
+                    "[AI TUNER] UUP (USD proxy) is strongly bullish (%s). Penalizing GLD regime: %s -> %s",
+                    uup_regime, old_regime, go_regime
+                )
+            self.current_regimes["Gold"] = go_regime
+            profile = self._apply_regime_profile("Gold", go_regime)
+            results["Gold"] = {"regime": go_regime, "profile": profile, "atr_pct": go_atr}
+            log_msgs.append(f"GOLD: {go_regime}")
+
+        # 4. BROAD COMMODITY SECTOR (PDBC) -> impacts Trend Following
+        bc_regime, bc_atr = self._analyze_asset_regime("PDBC", volatile_threshold=2.0)
+        if bc_regime:
+            # Check macro Oil proxy USO
+            uso_regime, _ = self._analyze_asset_regime("USO", volatile_threshold=2.0)
+            if uso_regime in ["Bullish Calm", "Bullish Volatile"]:
+                # Boost PDBC regime
+                old_regime = bc_regime
+                if bc_regime == "Bearish Volatile":
+                    bc_regime = "Bearish Chop"
+                elif bc_regime == "Bearish Chop":
+                    bc_regime = "Range-Bound Calm"
+                elif bc_regime == "Range-Bound Calm":
+                    bc_regime = "Bullish Calm"
+                elif bc_regime == "Bullish Calm":
+                    bc_regime = "Bullish Volatile"
+                logger.info(
+                    "[AI TUNER] USO (Oil proxy) is strongly bullish (%s). Boosting PDBC regime: %s -> %s",
+                    uso_regime, old_regime, bc_regime
+                )
+            self.current_regimes["Broad Commodity"] = bc_regime
+            profile = self._apply_regime_profile("Broad Commodity", bc_regime)
+            results["Broad Commodity"] = {"regime": bc_regime, "profile": profile, "atr_pct": bc_atr}
+            log_msgs.append(f"BROAD_COM: {bc_regime}")
 
         if results:
             self.last_tuned_time = now

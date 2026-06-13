@@ -29,6 +29,8 @@ class StrategySignal:
     timestamp: datetime
     order_type: str = "MARKET"
     fat_tail_scalar: float = 1.0
+    time_stop_bars: int = 10
+    trailing_stop_logic: str = "default"
 
 
 class BaseStrategy(ABC):

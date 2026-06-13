@@ -14,38 +14,15 @@ import config
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum_breakout import MomentumBreakoutStrategy
 from src.strategies.trend_pullback import TrendPullbackStrategy
+from src.strategies.trend_following import TrendFollowingStrategy
 from charts.data import fetch_ohlcv
+from src.backtester import simulate_trade
 
 # Suppress debug logging during backtest to keep console clean
 logging.basicConfig(level=logging.CRITICAL, format='%(message)s')
 logging.getLogger("src.strategies").setLevel(logging.CRITICAL)
 logging.getLogger("charts.data").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
-
-def simulate_trade(df, entry_idx, signal):
-    """Simulate future price action to determine outcome (TP, SL, TIME_STOP, OPEN)."""
-    future_df = df.iloc[entry_idx + 1:]
-    
-    # Time Stop: 4 hours for Equities (16 bars @ 15m), 10 hours for Crypto (10 bars @ 1h)
-    max_bars = 10 if signal.ticker in ["BTC-USD", "ETH-USD"] else 16
-    
-    for i, (_, row) in enumerate(future_df.iterrows()):
-        # 1. Enforce Time Stop
-        if i >= max_bars:
-            return 'TIME_STOP', row['Close'], i + 1
-            
-        high = row['High']
-        low = row['Low']
-        
-        if signal.direction == 'BUY':
-            if low <= signal.stop_loss: return 'SL', signal.stop_loss, i + 1
-            if high >= signal.take_profit: return 'TP', signal.take_profit, i + 1
-        elif signal.direction == 'SELL':
-            if high >= signal.stop_loss: return 'SL', signal.stop_loss, i + 1
-            if low <= signal.take_profit: return 'TP', signal.take_profit, i + 1
-            
-    # If the trade is still open at the end of the data, use the last close price
-    return 'OPEN', future_df["Close"].iloc[-1] if len(future_df) > 0 else signal.entry, len(future_df)
 
 def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
     import json
@@ -60,6 +37,10 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
                         setattr(config, k, int(float(v)))
                     else:
                         setattr(config, k, float(v))
+            if "TF_EMA_FAST" in best_params:
+                val = int(float(best_params["TF_EMA_FAST"]))
+                config.GLD_EMA_FAST = val
+                config.PDBC_EMA_FAST = val
     else:
         print("-> Using default parameters from config.py...")
 
@@ -73,7 +54,9 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
         ("QQQ", "15m", MeanReversionStrategy()),
         ("SPY", "15m", TrendPullbackStrategy()),
         ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy())
+        ("BTC-USD", "1h", MomentumBreakoutStrategy()),
+        ("GLD", "4h", TrendFollowingStrategy()),
+        ("PDBC", "4h", TrendFollowingStrategy())
     ]
     
     total_signals = 0
@@ -108,32 +91,26 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
             
             signal = strategy.analyze(window_df, ticker)
             if signal:
+                outcome, exit_price, bars, pnl_per_share = simulate_trade(df, i, signal)
+                if outcome == 'NO_FILL':
+                    continue
+                
                 ticker_signals += 1
-                outcome, exit_price, bars = simulate_trade(df, i, signal)
                 
                 # Calculate PnL mathematically based on standard Risk/Reward principles
                 risk_per_share = abs(signal.entry - signal.stop_loss)
                 if risk_per_share == 0: continue
                 
                 qty = RISK_DOLLARS / risk_per_share
-                
-                # Prevent infinite margin leverage (Max 1x account size per trade for backtest realism)
                 max_qty = account_size / signal.entry
                 qty = min(qty, max_qty)
                 
-                if signal.direction == 'BUY':
-                    trade_pnl = (exit_price - signal.entry) * qty
-                else:
-                    trade_pnl = (signal.entry - exit_price) * qty
-                
-                # Subtract transaction cost
-                trade_pnl -= (signal.entry * qty * (config.BACKTEST_SLIPPAGE_FRICTION_PCT / 2.0)) + (exit_price * qty * (config.BACKTEST_SLIPPAGE_FRICTION_PCT / 2.0))
-                
+                trade_pnl = pnl_per_share * qty
                 ticker_pnl += trade_pnl
                 
-                if outcome == 'TP': 
+                if outcome == 'TP' or outcome == 'TRAIL_SL' or trade_pnl > 0: 
                     ticker_wins += 1
-                elif outcome == 'SL': 
+                elif outcome == 'SL' or trade_pnl < 0: 
                     ticker_losses += 1
                     
         total_signals += ticker_signals

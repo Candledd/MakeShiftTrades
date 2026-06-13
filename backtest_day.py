@@ -17,30 +17,11 @@ from src.strategies.momentum_breakout import MomentumBreakoutStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.trend_pullback import TrendPullbackStrategy
 from charts.data import fetch_ohlcv
+from src.backtester import simulate_trade
 
 logging.basicConfig(level=logging.CRITICAL, format='%(message)s')
 logging.getLogger("src.strategies").setLevel(logging.CRITICAL)
 logging.getLogger("charts.data").setLevel(logging.CRITICAL)
-
-def simulate_trade(df, entry_idx, signal):
-    future_df = df.iloc[entry_idx + 1:]
-    
-    for i, (_, row) in enumerate(future_df.iterrows()):
-        high = row['High']
-        low = row['Low']
-        
-        if signal.direction == 'BUY':
-            if low <= signal.stop_loss:
-                return 'SL', i + 1
-            if high >= signal.take_profit:
-                return 'TP', i + 1
-        elif signal.direction == 'SELL':
-            if high >= signal.stop_loss:
-                return 'SL', i + 1
-            if low <= signal.take_profit:
-                return 'TP', i + 1
-                
-    return 'OPEN', len(future_df)
 
 def run_backtest():
     print("=" * 60)
@@ -103,17 +84,20 @@ def run_backtest():
                 signal = strategy.analyze(window_df, ticker)
                 
                 if signal:
+                    outcome, exit_price, bars, pnl_per_share = simulate_trade(df, i, signal)
+                    if outcome == 'NO_FILL':
+                        print(f"  [{df.index[i].strftime('%Y-%m-%d %H:%M')}] SIGNAL: {signal.direction} | Outcome: NO_FILL")
+                        continue
+                        
                     signals_generated += 1
-                    outcome, bars = simulate_trade(df, i, signal)
-                    
-                    if outcome == 'TP':
+                    if outcome in ('TP', 'TRAIL_SL') or pnl_per_share > 0:
                         wins += 1
-                    elif outcome == 'SL':
+                    elif outcome == 'SL' or pnl_per_share < 0:
                         losses += 1
                     else:
                         open_trades += 1
                         
-                    print(f"  [{df.index[i].strftime('%Y-%m-%d %H:%M')}] SIGNAL: {signal.direction} | R/R: {abs(signal.take_profit-signal.entry)/abs(signal.stop_loss-signal.entry):.2f} | Outcome: {outcome} ({bars} bars)")
+                    print(f"  [{df.index[i].strftime('%Y-%m-%d %H:%M')}] SIGNAL: {signal.direction} | R/R: {abs(signal.take_profit-signal.entry)/abs(signal.stop_loss-signal.entry):.2f} | Outcome: {outcome} ({bars} bars) | PnL/share: {pnl_per_share:+.4f}")
             
             print(f"  Summary: {signals_generated} signals | {wins} Wins, {losses} Losses, {open_trades} Open")
             print(f"  Rejects: {vol_rejects} due to Volume | {rr_rejects} due to R/R")

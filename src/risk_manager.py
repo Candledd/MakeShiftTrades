@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Optional
+import pandas as pd
 from src.strategies import StrategySignal
 from src.database import get_realized_pnl, get_strategy_expectancy
 import config as _cfg
@@ -17,7 +18,7 @@ SPY_QQQ_UNIT = {"SPY", "QQQ"}
 
 MAX_STOP_PCT = 0.10      # Maximum stop distance as fraction of entry (10%)
 MIN_STOP_PCT = 0.001     # Minimum stop distance as fraction of entry (0.1%)
-MIN_RR_RATIO = 0.3       # Minimum reward/risk ratio
+MIN_RR_RATIO = 1.0       # Universal minimum reward/risk ratio (fallback)
 
 
 class RiskManager:
@@ -68,6 +69,65 @@ class RiskManager:
         """Resolve a ticker to its canonical (Alpaca) form."""
         return self._ticker_map.get(raw, raw)
 
+    # ── Asset-Specific Fallback Risk Mapping (Position Restart Recovery) ──
+    # Midpoints of the risk ranges specified for each asset:
+    #   SPY/QQQ  →  2.5%  (range 2-3%)
+    #   BTC      → 10.0%  (range 8-12%)
+    #   GLD      →  4.0%  (range 3-5%)
+    #   PDBC     →  6.5%  (range 5-8%)
+    # Used as the default stop-distance percentage when reconstructing
+    # position state after a restart and the original stop-loss is unknown.
+    _FALLBACK_RISK_MAP: dict[str, float] = {
+        # SPY & QQQ — large-cap equity ETFs (tightest range 2-3%)
+        "SPY":   0.025,  # 2.5% — midpoint of 2-3%
+        "QQQ":   0.025,  # 2.5% — midpoint of 2-3%
+        # Crypto — highest volatility, widest range 8-12%
+        "BTC-USD": 0.10,  # 10.0% — midpoint of 8-12%
+        "BTCUSD":  0.10,  # 10.0% — midpoint of 8-12%
+        # Gold — moderate volatility, range 3-5%
+        "GLD":   0.04,   # 4.0% — midpoint of 3-5%
+        # Broad commodities — medium-high volatility, range 5-8%
+        "PDBC":  0.065,  # 6.5% — midpoint of 5-8%
+    }
+
+    # Fallback percentages per asset class (used when the exact symbol
+    # is not in _FALLBACK_RISK_MAP but the asset class is known).
+    _CLASS_FALLBACK_RISK: dict[str, float] = {
+        "equity":    0.025,  # 2.5%
+        "crypto":    0.10,   # 10.0%
+        "commodity": 0.05,   # 5.0% (general commodity fallback)
+    }
+
+    def get_fallback_risk_pct(self, symbol: str) -> float:
+        """Return the asset-specific fallback risk percentage for *symbol*.
+
+        Risk ranges (midpoint used):
+          SPY/QQQ  →  2–3%    (2.5%)
+          BTC      →  8–12%   (10.0%)
+          GLD      →  3–5%    (4.0%)
+          PDBC     →  5–8%    (6.5%)
+
+        Falls back to the asset-class average for other known assets,
+        or a general 5% for unrecognised tickers.
+        """
+        resolved = self._resolve_ticker(symbol)
+
+        # 1. Exact symbol match in the mapping (most specific)
+        fallback = self._FALLBACK_RISK_MAP.get(resolved)
+        if fallback is not None:
+            return fallback
+
+        # 2. Asset-class level matching (broader fallback for related tickers)
+        if resolved in RISK_ON_ASSETS or symbol in RISK_ON_ASSETS:
+            return self._CLASS_FALLBACK_RISK["equity"]
+        if resolved in CRYPTO_ASSETS or symbol in CRYPTO_ASSETS:
+            return self._CLASS_FALLBACK_RISK["crypto"]
+        if resolved in COMMODITY_ASSETS or symbol in COMMODITY_ASSETS:
+            return self._CLASS_FALLBACK_RISK["commodity"]
+
+        # 3. Catch-all — 5% for completely unknown tickers
+        return 0.05
+
     def _resolve_symbol_set(self, items: list, key_field: str = "symbol") -> set[str]:
         """Build a set of symbols from *items*, including resolved aliases."""
         symbols: set[str] = set()
@@ -114,22 +174,55 @@ class RiskManager:
 
     # ── Spread / Liquidity Validation ─────────────────────────────────
 
-    def _check_atr_spread(self, signal: StrategySignal) -> tuple[bool, str]:
-        """Reject trades where ATR/price exceeds the spread cap.
-
-        A high ATR‑to‑price ratio is a proxy for wide bid‑ask spreads or
-        illiquid markets.  Returns ``(True, "OK")`` or ``(False, reason)``.
+    def _check_execution_metrics(
+        self, signal: StrategySignal, df: pd.DataFrame = None, quote: dict = None, notional: float = 0.0
+    ) -> tuple[bool, str]:
+        """Reject trades based on true execution liquidity, not just volatility.
+        
+        Evaluates:
+        - Spread relative to target (if quote available)
+        - Market impact / Participation rate (if DF available)
+        - ATR/Price as a volatility shock filter
         """
-        if signal.atr <= 0 or signal.entry <= 0:
-            return (True, "OK")  # can't judge — pass
-
-        atr_pct = signal.atr / signal.entry
-        if atr_pct > self._spread_atr_cap_pct:
-            return (
-                False,
-                f"ATR spread cap: ATR/price {atr_pct:.4f} exceeds "
-                f"{self._spread_atr_cap_pct:.4f}",
-            )
+        # 1. Volatility Shock Filter (ATR/Price)
+        if signal.atr > 0 and signal.entry > 0:
+            atr_pct = signal.atr / signal.entry
+            if atr_pct > self._spread_atr_cap_pct:
+                return (
+                    False,
+                    f"Volatility shock cap: ATR/price {atr_pct:.4f} exceeds "
+                    f"{self._spread_atr_cap_pct:.4f}",
+                )
+                
+        # 2. Market Impact / Participation Rate
+        if df is not None and len(df) >= 20 and notional > 0:
+            # 20-bar rolling dollar volume
+            dollar_vol = (df["Close"] * df["Volume"]).rolling(20).mean().iloc[-1]
+            if dollar_vol > 0:
+                participation_rate = notional / dollar_vol
+                # Soft cap at 5% of recent 20-bar average volume to prevent moving the market
+                if participation_rate > 0.05:
+                    return (
+                        False,
+                        f"Liquidity rejected: Order size ${notional:.0f} exceeds 5% of "
+                        f"avg bar volume ${dollar_vol:.0f} (PR={participation_rate:.3f})"
+                    )
+                    
+        # 3. Live Bid/Ask Spread vs Expected Target
+        if quote is not None:
+            bid = quote.get("bid", 0.0)
+            ask = quote.get("ask", 0.0)
+            if bid > 0 and ask > 0 and ask > bid:
+                spread = ask - bid
+                target_dist = abs(signal.take_profit - signal.entry)
+                # Reject if crossing the spread eats more than 10% of the gross target
+                if target_dist > 0 and (spread / target_dist) > 0.10:
+                    return (
+                        False,
+                        f"Spread rejected: Bid/Ask spread ${spread:.3f} eats "
+                        f"{(spread/target_dist)*100:.1f}% of gross target ${target_dist:.3f}"
+                    )
+                    
         return (True, "OK")
 
     # ── Volatility Shock Adjustment ───────────────────────────────────
@@ -195,8 +288,10 @@ class RiskManager:
             ai_mult = getattr(_cfg, 'AI_RISK_MULTIPLIER_EQUITY', 1.0)
         elif signal.strategy_name == "momentum_breakout":
             ai_mult = getattr(_cfg, 'AI_RISK_MULTIPLIER_CRYPTO', 1.0)
-        elif signal.strategy_name == "trend_following":
-            ai_mult = getattr(_cfg, 'AI_RISK_MULTIPLIER_COMMODITY', 1.0)
+        elif signal.ticker == "GLD":
+            ai_mult = getattr(_cfg, 'AI_RISK_MULTIPLIER_GOLD', 1.0)
+        elif signal.ticker == "PDBC":
+            ai_mult = getattr(_cfg, 'AI_RISK_MULTIPLIER_BROAD_COMMODITY', 1.0)
         else:
             ai_mult = 1.0
 
@@ -302,7 +397,7 @@ class RiskManager:
                 # Fallback after restart if state is missing
                 pos = next((p for p in current_positions if p.get('symbol') == sym), None)
                 if pos:
-                    total_risk_usd += pos.get('market_value', 0.0) * 0.05
+                    total_risk_usd += pos.get('market_value', 0.0) * self.get_fallback_risk_pct(sym)
 
         # ── Include proposed trade risk in portfolio heat ─────────────
         if proposed_notional > 0 and signal.entry > 0:
@@ -333,7 +428,7 @@ class RiskManager:
                     else:
                         pos = next((p for p in current_positions if p.get('symbol') == sym), None)
                         if pos:
-                            risk += pos.get('market_value', 0.0) * 0.05
+                            risk += pos.get('market_value', 0.0) * self.get_fallback_risk_pct(sym)
             return risk
 
         if account_equity > 0:
@@ -460,7 +555,8 @@ class RiskManager:
     # ── Signal Validation ──────────────────────────────────────────────
 
     def validate_signal(
-        self, signal: StrategySignal, signal_regime: str | None = None
+        self, signal: StrategySignal, signal_regime: str | None = None,
+        df: pd.DataFrame = None, quote: dict = None, notional: float = 0.0
     ) -> tuple[bool, str]:
         """Validate the signal's price, stop, R/R, direction consistency,
         ATR-based spread/liquidity cap, and strategy expectancy.
@@ -491,9 +587,26 @@ class RiskManager:
         reward = abs(signal.take_profit - signal.entry)
         if risk <= 0:
             return (False, "Zero risk")
+        
+        # Strategy-specific R/R minimums as the ultimate safety net
+        if signal.strategy_name == "mean_reversion":
+            # Strict fixed R/R for mean reversion
+            min_rr = getattr(_cfg, 'MR_MIN_RR', 1.2)
+        elif signal.strategy_name == "trend_pullback":
+            # Higher structural R/R required for pullback setups
+            min_rr = getattr(_cfg, 'TP_MIN_RR', 1.5)
+        elif signal.strategy_name == "momentum_breakout":
+            # Momentum breakout expects uncapped runner expectancy; ensure initial partial covers risk
+            min_rr = getattr(_cfg, 'MB_PARTIAL_TP_RISK_MULT', 1.0)
+        elif signal.strategy_name == "trend_following":
+            # Trend following relies on trailing stops; do not penalize fixed target too aggressively
+            min_rr = getattr(_cfg, 'TF_MIN_RR', 0.8)
+        else:
+            min_rr = MIN_RR_RATIO
+            
         # Add a tiny 0.01 tolerance to account for floating point inaccuracies (e.g. 1.499999 < 1.5)
-        if (reward / risk) < (MIN_RR_RATIO - 0.01):
-            return (False, f"R/R below {MIN_RR_RATIO}")
+        if (reward / risk) < (min_rr - 0.01):
+            return (False, f"R/R {(reward/risk):.2f} below {min_rr} for {signal.strategy_name}")
 
         # 4. Direction consistency
         if signal.direction == "BUY":
@@ -513,8 +626,8 @@ class RiskManager:
         if signal.confidence <= 0:
             return (False, "Confidence must be > 0")
 
-        # 6. ATR-based spread / liquidity cap
-        spread_ok, spread_reason = self._check_atr_spread(signal)
+        # 6. Execution liquidity and spread checks
+        spread_ok, spread_reason = self._check_execution_metrics(signal, df=df, quote=quote, notional=notional)
         if not spread_ok:
             return (False, spread_reason)
 
@@ -547,6 +660,8 @@ class RiskManager:
         active_orders: list[dict] = None,
         position_state: dict = None,
         signal_regime: Optional[str] = None,
+        df: pd.DataFrame = None,
+        quote: dict = None,
     ) -> tuple[bool, float, str]:
         """Run the full risk pipeline: validate → correlation → size.
 
@@ -579,13 +694,7 @@ class RiskManager:
             )
             return (False, 0.0, f"Weekly P&L kill switch: ${weekly_pnl:.2f} exceeds limit")
 
-        # 1. Validate signal
-        valid, reason = self.validate_signal(signal, signal_regime=signal_regime)
-        if not valid:
-            self.logger.info("Signal rejected: %s %s — %s", signal.direction, signal.ticker, reason)
-            return (False, 0.0, reason)
-
-        # 2. Position sizing (calculated early for portfolio heat check)
+        # 1. Position sizing (calculated early for validation and portfolio heat)
         notional = self.calculate_position_size(signal, account_equity, signal_regime=signal_regime)
         if notional <= 0:
             self.logger.info(
@@ -594,6 +703,14 @@ class RiskManager:
                 signal.ticker,
             )
             return (False, 0.0, "Position size is zero")
+
+        # 2. Validate signal with full liquidity awareness
+        valid, reason = self.validate_signal(
+            signal, signal_regime=signal_regime, df=df, quote=quote, notional=notional
+        )
+        if not valid:
+            self.logger.info("Signal rejected: %s %s — %s", signal.direction, signal.ticker, reason)
+            return (False, 0.0, reason)
 
         # 3. Correlation filter (now includes double-dip guard against active orders
         #    and portfolio heat check with proposed notional)
@@ -610,3 +727,5 @@ class RiskManager:
             "Signal approved: %s %s $%.2f", signal.direction, signal.ticker, notional
         )
         return (True, notional, "Approved")
+
+

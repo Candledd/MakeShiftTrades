@@ -110,70 +110,89 @@ class MeanReversionStrategy(BaseStrategy):
             return None
         vol_ratio = float(volume.iloc[-1]) / float(vol_mean)
 
-        # -- Volume spike filter -----------------------------------------
-        if vol_ratio <= config.MR_VOL_SPIKE_MULT:
-            logger.debug(
-                "%s %s: volume too low (%.2f < %.2f)",
-                self.name, ticker, vol_ratio, config.MR_VOL_SPIKE_MULT,
-            )
-            return None
-
-        # -- Failed-extension entry logic --------------------------------
-        #
-        # Look 1–3 bars back for a close *outside* the band, then require
-        # that the most recent bar shows reclamation (close back inside).
-        # This avoids catching momentum on the first band break.
-        #
-        # LONG  setup: earlier bar closed below lower band, current bar
-        #              closes back above the lower band.
-        # SHORT setup: earlier bar closed above upper band, current bar
-        #              closes back below the upper band.
-        # ----------------------------------------------------------------
+        # -- Determine Sub-Playbook --------------------------------------
         direction: Optional[str] = None
-
-        # Scan recent bars (index -1 is current, -2 is previous, …)
-        for offset in range(2, min(len(df), 5)):  # look back 2–4 bars
-            prev_close = float(close.iloc[-offset])
-            prev_close_lower = float(lower.iloc[-offset])
-            prev_close_upper = float(upper.iloc[-offset])
-
-            # -- Long signal candidate --
+        playbook: Optional[str] = None
+        
+        target_price = current_sma20 # Default target
+        
+        # Volatility check for Quiet Playbook
+        atr_pct = atr_val / current_close
+        is_low_vol = atr_pct < 0.003  # less than 0.3% ATR
+        
+        for offset in range(2, min(len(df), 5)):
+            prev_low = float(low.iloc[-offset])
+            prev_high = float(high.iloc[-offset])
+            prev_lower = float(lower.iloc[-offset])
+            prev_upper = float(upper.iloc[-offset])
+            
+            # --- Playbook A: Climax Failed-Extension ---
+            # Requires elevated volume, deep band break, and extreme RSI
+            is_deep_break_long = prev_low < prev_lower * 0.998
+            is_deep_break_short = prev_high > prev_upper * 1.002
+            
             if (
-                float(low.iloc[-offset]) < prev_close_lower * 1.01                       # was outside lower band
-                and current_close > current_lower * 0.99                   # reclaimed the band
-                and current_rsi < config.MR_RSI_OVERSOLD            # RSI exhaustion
+                is_deep_break_long
+                and current_close > current_lower * 0.99
+                and current_rsi < config.MR_RSI_OVERSOLD
+                and vol_ratio > max(1.2, config.MR_VOL_SPIKE_MULT)
+                and vol_ratio <= 10.0
             ):
-                # Volume must show climax fading (elevated but not extreme)
-                if vol_ratio <= 10.0:      # volume still above min
+                direction = "BUY"
+                playbook = "A_CLIMAX"
+                target_price = current_sma20
+                break
+                
+            if (
+                is_deep_break_short
+                and current_close < current_upper * 1.01
+                and current_rsi > config.MR_RSI_OVERBOUGHT
+                and vol_ratio > max(1.2, config.MR_VOL_SPIKE_MULT)
+                and vol_ratio <= 10.0
+            ):
+                direction = "SELL"
+                playbook = "A_CLIMAX"
+                target_price = current_sma20
+                break
+                
+            # --- Playbook B: Quiet VWAP Deviation ---
+            # Requires low realized vol, VWAP deviation, less extreme RSI, no vol spike needed
+            if is_low_vol:
+                if (
+                    prev_low < prev_lower * 1.01
+                    and current_close > current_lower * 0.99
+                    and current_rsi < 45.0
+                    and current_close < current_vwap * 0.998
+                ):
                     direction = "BUY"
+                    playbook = "B_QUIET"
+                    target_price = current_vwap
                     break
-
-            # -- Short signal candidate --
-            if (
-                float(high.iloc[-offset]) > prev_close_upper * 0.99                       # was outside upper band
-                and current_close < current_upper * 1.01                   # reclaimed the band
-                and current_rsi > config.MR_RSI_OVERBOUGHT          # RSI exhaustion
-            ):
-                if vol_ratio <= 10.0:
+                    
+                if (
+                    prev_high > prev_upper * 0.99
+                    and current_close < current_upper * 1.01
+                    and current_rsi > 55.0
+                    and current_close > current_vwap * 1.002
+                ):
                     direction = "SELL"
+                    playbook = "B_QUIET"
+                    target_price = current_vwap
                     break
 
         if direction is None:
             return None
 
         # -- Entry / Exit -----------------------------------------------
-        # Even for limit orders, we use the current_close (the reclaim price) 
-        # to avoid missing the trade if price continues reverting.
         entry = current_close
-        if config.USE_LIMIT_ORDERS_MR:
-            order_type = "LIMIT"
-        else:
-            order_type = "MARKET"
+        order_type = "LIMIT" if config.USE_LIMIT_ORDERS_MR else "MARKET"
 
-        stop_loss = self.compute_stop_loss(entry, direction, atr=atr_val)
+        # Tighter stop for Quiet Playbook
+        stop_mult = config.MR_STOP_MULT if playbook == "A_CLIMAX" else config.MR_STOP_MULT * 0.7
+        stop_distance = stop_mult * atr_val
+        stop_loss = entry - stop_distance if direction == "BUY" else entry + stop_distance
 
-        # Take-profit: dynamic target based on distance to SMA
-        take_profit = entry + (current_sma20 - entry) * getattr(config, 'MR_TP_TARGET_MULT', 1.0)
+        take_profit = entry + (target_price - entry) * getattr(config, 'MR_TP_TARGET_MULT', 1.0)
 
         # R/R gate: TP must meet the minimum R/R ratio to survive slippage
         tp_distance = abs(take_profit - entry)
@@ -193,26 +212,28 @@ class MeanReversionStrategy(BaseStrategy):
         # -- Confidence (0–90) ------------------------------------------
         confidence = 40.0
 
-        # RSI extreme
-        if direction == "BUY" and current_rsi < 25:
-            confidence += 15.0
-        elif direction == "SELL" and current_rsi > 75:
-            confidence += 15.0
-
-        # Deep band extension (the offset bar)
-        for offset in range(2, min(len(df), 5)):
-            if direction == "BUY" and float(low.iloc[-offset]) < float(lower.iloc[-offset]) * 0.995:
+        if playbook == "A_CLIMAX":
+            # Climax rewards extreme RSI, high volume, and deep wicks
+            if direction == "BUY" and current_rsi < 25:
+                confidence += 15.0
+            elif direction == "SELL" and current_rsi > 75:
+                confidence += 15.0
+                
+            if vol_ratio > 2.0:
                 confidence += 10.0
-                break
-            elif direction == "SELL" and float(high.iloc[-offset]) > float(upper.iloc[-offset]) * 1.005:
-                confidence += 10.0
-                break
+                
+        elif playbook == "B_QUIET":
+            # Quiet rewards low vol and tight price action, but caps confidence slightly lower
+            # since it is not a major structural reversal
+            confidence = 35.0
+            if atr_pct < 0.002:
+                confidence += 15.0
+            if direction == "BUY" and current_close < current_vwap * 0.996:
+                confidence += 15.0
+            elif direction == "SELL" and current_close > current_vwap * 1.004:
+                confidence += 15.0
 
-        # Volume confirmation > 1.5x
-        if vol_ratio > 1.5:
-            confidence += 10.0
-
-        # Wick on the failed-extension bar (reversal confirmation)
+        # Wick on the failed-extension bar (reversal confirmation) applies to both
         for offset in range(2, min(len(df), 5)):
             if direction == "BUY" and float(close.iloc[-offset]) > float(low.iloc[-offset]) + (float(close.iloc[-offset]) - float(low.iloc[-offset])) * 0.3:
                 confidence += 10.0
@@ -221,19 +242,14 @@ class MeanReversionStrategy(BaseStrategy):
                 confidence += 10.0
                 break
 
-        # VWAP deviation
-        if direction == "BUY" and current_close < current_vwap * 0.997:
-            confidence += 10.0
-        elif direction == "SELL" and current_close > current_vwap * 1.003:
-            confidence += 10.0
-
         confidence = min(90.0, confidence)
 
         # -- Reason -----------------------------------------------------
+        playbook_name = "Climax Fade" if playbook == "A_CLIMAX" else "Quiet VWAP Reversion"
         reason = (
-            f"Mean reversion {direction}: "
-            f"failed extension, RSI={current_rsi:.1f}, "
-            f"reclaimed BB"
+            f"Mean reversion {direction} ({playbook_name}): "
+            f"RSI={current_rsi:.1f}, "
+            f"VolRatio={vol_ratio:.1f}x"
         )
 
         # -- Record signal ----------------------------------------------
@@ -252,4 +268,6 @@ class MeanReversionStrategy(BaseStrategy):
             atr=round(atr_val, 4),
             timestamp=datetime.now(timezone.utc),
             order_type=order_type,
+            time_stop_bars=6,
+            trailing_stop_logic="breakeven_only",
         )

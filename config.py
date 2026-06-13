@@ -137,9 +137,14 @@ except ValueError:
     raise ValueError("AI_RISK_MULTIPLIER_CRYPTO must be a valid number")
 
 try:
-    AI_RISK_MULTIPLIER_COMMODITY = float(os.getenv("AI_RISK_MULTIPLIER_COMMODITY", "1.0"))
+    AI_RISK_MULTIPLIER_GOLD = float(os.getenv("AI_RISK_MULTIPLIER_GOLD", "1.0"))
 except ValueError:
-    raise ValueError("AI_RISK_MULTIPLIER_COMMODITY must be a valid number")
+    raise ValueError("AI_RISK_MULTIPLIER_GOLD must be a valid number")
+
+try:
+    AI_RISK_MULTIPLIER_BROAD_COMMODITY = float(os.getenv("AI_RISK_MULTIPLIER_BROAD_COMMODITY", "1.0"))
+except ValueError:
+    raise ValueError("AI_RISK_MULTIPLIER_BROAD_COMMODITY must be a valid number")
 
 # ── Bot Operation ─────────────────────────────────────────────────────────────
 try:
@@ -250,9 +255,14 @@ except ValueError:
 
 # ── Trend Following Strategy (GLD, PDBC — 4h) ─────────────────────────────────
 try:
-    TF_EMA_FAST = int(os.getenv("TF_EMA_FAST", "20"))
+    GLD_EMA_FAST = int(os.getenv("GLD_EMA_FAST", "20"))
 except ValueError:
-    raise ValueError("TF_EMA_FAST must be a valid integer")
+    raise ValueError("GLD_EMA_FAST must be a valid integer")
+
+try:
+    PDBC_EMA_FAST = int(os.getenv("PDBC_EMA_FAST", "20"))
+except ValueError:
+    raise ValueError("PDBC_EMA_FAST must be a valid integer")
 
 try:
     TF_EMA_SLOW = int(os.getenv("TF_EMA_SLOW", "50"))
@@ -264,8 +274,59 @@ try:
 except ValueError:
     raise ValueError("TF_ATR_TARGET_MULT must be a valid number")
 
+# ── Trend Following — GLD-specific ─────────────────────────────────────────
+try:
+    GLD_STOP_MULT = float(os.getenv("GLD_STOP_MULT", "3.0"))
+except ValueError:
+    raise ValueError("GLD_STOP_MULT must be a valid number")
+
+GLD_TREND_FILTER = os.getenv("GLD_TREND_FILTER", "HTF")
+
+GLD_PULLBACK_TRIGGER = os.getenv("GLD_PULLBACK_TRIGGER", "enabled")
+
+# ── Trend Following — PDBC-specific ────────────────────────────────────────
+try:
+    PDBC_STOP_MULT = float(os.getenv("PDBC_STOP_MULT", "2.0"))
+except ValueError:
+    raise ValueError("PDBC_STOP_MULT must be a valid number")
+
+try:
+    PDBC_ADX_MIN = float(os.getenv("PDBC_ADX_MIN", "25.0"))
+except ValueError:
+    raise ValueError("PDBC_ADX_MIN must be a valid number")
+
+try:
+    PDBC_RANGE_EXPANSION_THRESHOLD = float(os.getenv("PDBC_RANGE_EXPANSION_THRESHOLD", "0.75"))
+except ValueError:
+    raise ValueError("PDBC_RANGE_EXPANSION_THRESHOLD must be a valid number")
+
 # ── ML Veto Filter (autonomous engine) ────────────────────────────────────────
 ML_VETO_ENABLED = os.getenv("ML_VETO_ENABLED", "true").lower() == "true"
+
+try:
+    ML_VETO_THRESHOLD = float(os.getenv("ML_VETO_THRESHOLD", "0.3"))
+except ValueError:
+    raise ValueError("ML_VETO_THRESHOLD must be a valid number")
+
+try:
+    ML_MILD_DISAGREEMENT_THRESHOLD = float(os.getenv("ML_MILD_DISAGREEMENT_THRESHOLD", "0.45"))
+except ValueError:
+    raise ValueError("ML_MILD_DISAGREEMENT_THRESHOLD must be a valid number")
+
+try:
+    ML_MILD_DISAGREEMENT_SCALING = float(os.getenv("ML_MILD_DISAGREEMENT_SCALING", "0.5"))
+except ValueError:
+    raise ValueError("ML_MILD_DISAGREEMENT_SCALING must be a valid number")
+
+try:
+    ML_AGREEMENT_THRESHOLD = float(os.getenv("ML_AGREEMENT_THRESHOLD", "0.6"))
+except ValueError:
+    raise ValueError("ML_AGREEMENT_THRESHOLD must be a valid number")
+
+try:
+    ML_AGREEMENT_BOOST = float(os.getenv("ML_AGREEMENT_BOOST", "1.2"))
+except ValueError:
+    raise ValueError("ML_AGREEMENT_BOOST must be a valid number")
 
 # ── Cooldown / Anti-Whipsaw ───────────────────────────────────────────────────
 try:
@@ -337,7 +398,7 @@ except ValueError:
     raise ValueError("MB_ATR_PERCENTILE_LOOKBACK must be a valid integer")
 
 try:
-    MB_COMPRESSION_THRESHOLD = float(os.getenv("MB_COMPRESSION_THRESHOLD", "0.0"))
+    MB_COMPRESSION_THRESHOLD = float(os.getenv("MB_COMPRESSION_THRESHOLD", "55.0"))
 except ValueError:
     raise ValueError("MB_COMPRESSION_THRESHOLD must be a valid number")
 
@@ -395,11 +456,54 @@ except ValueError:
 # ── Alpha Upgrades: Limit Orders, Trailing Stops, Time Stops ──────────────
 USE_LIMIT_ORDERS_MR = os.getenv("USE_LIMIT_ORDERS_MR", "true").lower() == "true"
 
-# Trailing stop as a percentage of current price (e.g., 3.0 = 3%)
+# ── Strategy-specific Trailing Stops ─────────────────────────────────────
+# Each strategy uses its own trailing logic type and ATR multiplier.
+# This replaces the old single TRAILING_STOP_PCT (percentage-based) with
+# per-strategy algorithms aligned with codex.md item 14.
+#
+# Logic types: vwap, sma20_or_ema, donchian, chandelier, atr, breakeven_only
+
+MR_TRAILING_STOP_LOGIC = os.getenv("MR_TRAILING_STOP_LOGIC", "vwap")
+TP_TRAILING_STOP_LOGIC = os.getenv("TP_TRAILING_STOP_LOGIC", "sma20_or_ema")
+MB_TRAILING_STOP_LOGIC = os.getenv("MB_TRAILING_STOP_LOGIC", "donchian")
+TF_TRAILING_STOP_LOGIC = os.getenv("TF_TRAILING_STOP_LOGIC", "atr")
+
+# Mean reversion: tight trail (exit at VWAP / SMA quickly, 0.5–1.0 ATR)
 try:
-    TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "3.0"))
+    MR_TRAIL_ATR_MULT = float(os.getenv("MR_TRAIL_ATR_MULT", "0.8"))
 except ValueError:
-    raise ValueError("TRAILING_STOP_PCT must be a valid number")
+    raise ValueError("MR_TRAIL_ATR_MULT must be a valid number")
+
+# Trend pullback: moderate trail below higher low / EMA (1.5–2.5 ATR)
+try:
+    TP_TRAIL_ATR_MULT = float(os.getenv("TP_TRAIL_ATR_MULT", "2.0"))
+except ValueError:
+    raise ValueError("TP_TRAIL_ATR_MULT must be a valid number")
+
+# BTC momentum breakout: wider Donchian / chandelier (2.5–4.0 ATR)
+try:
+    MB_TRAIL_ATR_MULT = float(os.getenv("MB_TRAIL_ATR_MULT", "3.0"))
+except ValueError:
+    raise ValueError("MB_TRAIL_ATR_MULT must be a valid number")
+
+# Trend following GLD: wider structure / ATR trail (3.0–5.0 ATR)
+try:
+    GLD_TRAIL_ATR_MULT = float(os.getenv("GLD_TRAIL_ATR_MULT", "3.5"))
+except ValueError:
+    raise ValueError("GLD_TRAIL_ATR_MULT must be a valid number")
+
+# PDBC: event/volatility-aware ATR trail (2.0–3.5 ATR)
+try:
+    PDBC_TRAIL_ATR_MULT = float(os.getenv("PDBC_TRAIL_ATR_MULT", "2.5"))
+except ValueError:
+    raise ValueError("PDBC_TRAIL_ATR_MULT must be a valid number")
+
+# PDBC event tightening factor: during macro events, multiply ATR distance
+# by this factor (e.g., 0.5 = tighten to half the normal distance)
+try:
+    PDBC_EVENT_TIGHTEN_FACTOR = float(os.getenv("PDBC_EVENT_TIGHTEN_FACTOR", "0.5"))
+except ValueError:
+    raise ValueError("PDBC_EVENT_TIGHTEN_FACTOR must be a valid number")
 
 # Per-asset-class time stop hours (triggers when a position is open too long with minimal profit)
 try:
@@ -466,8 +570,18 @@ if MB_EXPANSION_VOLUME_RATIO <= 0:
     raise ValueError(f"MB_EXPANSION_VOLUME_RATIO must be > 0, got {MB_EXPANSION_VOLUME_RATIO}")
 if MB_PARTIAL_TP_RISK_MULT <= 0:
     raise ValueError(f"MB_PARTIAL_TP_RISK_MULT must be > 0, got {MB_PARTIAL_TP_RISK_MULT}")
-if TRAILING_STOP_PCT < 0.5:
-    raise ValueError(f"TRAILING_STOP_PCT must be >= 0.5, got {TRAILING_STOP_PCT}")
+if MR_TRAIL_ATR_MULT <= 0:
+    raise ValueError(f"MR_TRAIL_ATR_MULT must be > 0, got {MR_TRAIL_ATR_MULT}")
+if TP_TRAIL_ATR_MULT <= 0:
+    raise ValueError(f"TP_TRAIL_ATR_MULT must be > 0, got {TP_TRAIL_ATR_MULT}")
+if MB_TRAIL_ATR_MULT <= 0:
+    raise ValueError(f"MB_TRAIL_ATR_MULT must be > 0, got {MB_TRAIL_ATR_MULT}")
+if GLD_TRAIL_ATR_MULT <= 0:
+    raise ValueError(f"GLD_TRAIL_ATR_MULT must be > 0, got {GLD_TRAIL_ATR_MULT}")
+if PDBC_TRAIL_ATR_MULT <= 0:
+    raise ValueError(f"PDBC_TRAIL_ATR_MULT must be > 0, got {PDBC_TRAIL_ATR_MULT}")
+if PDBC_EVENT_TIGHTEN_FACTOR <= 0:
+    raise ValueError(f"PDBC_EVENT_TIGHTEN_FACTOR must be > 0, got {PDBC_EVENT_TIGHTEN_FACTOR}")
 if TIME_STOP_EQUITY_HOURS < 1:
     raise ValueError(f"TIME_STOP_EQUITY_HOURS must be >= 1, got {TIME_STOP_EQUITY_HOURS}")
 if TIME_STOP_CRYPTO_HOURS < 1:
@@ -514,15 +628,26 @@ for _name, _val, _label in [
     ("MB_EXPANSION_VOLUME_RATIO", MB_EXPANSION_VOLUME_RATIO, "> 0"),
     ("MB_PARTIAL_TP_RISK_MULT", MB_PARTIAL_TP_RISK_MULT, "> 0"),
     ("MR_VOL_SPIKE_MULT", MR_VOL_SPIKE_MULT, ">= 0"),
-    ("TF_EMA_FAST", TF_EMA_FAST, ">= 2"),
+    ("GLD_EMA_FAST", GLD_EMA_FAST, ">= 2"),
+    ("PDBC_EMA_FAST", PDBC_EMA_FAST, ">= 2"),
     ("TF_EMA_SLOW", TF_EMA_SLOW, ">= 2"),
     ("TF_ATR_TARGET_MULT", TF_ATR_TARGET_MULT, "> 0"),
     ("TF_ADX_MIN_STRENGTH", TF_ADX_MIN_STRENGTH, "> 0"),
     ("ORDER_TTL_HOURS", ORDER_TTL_HOURS, "> 0"),
     ("AI_RISK_MULTIPLIER_EQUITY", AI_RISK_MULTIPLIER_EQUITY, "> 0"),
     ("AI_RISK_MULTIPLIER_CRYPTO", AI_RISK_MULTIPLIER_CRYPTO, "> 0"),
-    ("AI_RISK_MULTIPLIER_COMMODITY", AI_RISK_MULTIPLIER_COMMODITY, "> 0"),
+    ("AI_RISK_MULTIPLIER_GOLD", AI_RISK_MULTIPLIER_GOLD, "> 0"),
+    ("AI_RISK_MULTIPLIER_BROAD_COMMODITY", AI_RISK_MULTIPLIER_BROAD_COMMODITY, "> 0"),
     ("MAX_VIX_THRESHOLD", MAX_VIX_THRESHOLD, "> 0"),
+    ("GLD_STOP_MULT", GLD_STOP_MULT, "> 0"),
+    ("PDBC_STOP_MULT", PDBC_STOP_MULT, "> 0"),
+    ("PDBC_ADX_MIN", PDBC_ADX_MIN, "> 0"),
+    ("PDBC_RANGE_EXPANSION_THRESHOLD", PDBC_RANGE_EXPANSION_THRESHOLD, "> 0"),
+    ("ML_VETO_THRESHOLD", ML_VETO_THRESHOLD, "> 0"),
+    ("ML_MILD_DISAGREEMENT_THRESHOLD", ML_MILD_DISAGREEMENT_THRESHOLD, "> 0"),
+    ("ML_MILD_DISAGREEMENT_SCALING", ML_MILD_DISAGREEMENT_SCALING, "> 0"),
+    ("ML_AGREEMENT_THRESHOLD", ML_AGREEMENT_THRESHOLD, "> 0"),
+    ("ML_AGREEMENT_BOOST", ML_AGREEMENT_BOOST, "> 0"),
 ]:
     op, limit_str = _label.split(' ')
     limit = float(limit_str)
@@ -543,21 +668,36 @@ REGIME_PROFILES = {
             "AI_RISK_MULTIPLIER_EQUITY": 1.0,
             "MR_RSI_OVERSOLD": 40.0,
             "MR_RSI_OVERBOUGHT": 60.0,
+            "ROUTING_TREND_PULLBACK": "ENABLED",
+            "ROUTING_MEAN_REVERSION": "LONG_ONLY_HIGH_QUALITY",
+        },
+        "Range-Bound Calm": {
+            "AI_RISK_MULTIPLIER_EQUITY": 1.0,
+            "MR_RSI_OVERSOLD": 30.0,
+            "MR_RSI_OVERBOUGHT": 70.0,
+            "ROUTING_TREND_PULLBACK": "REDUCED",
+            "ROUTING_MEAN_REVERSION": "BOTH",
         },
         "Bullish Volatile": {
             "AI_RISK_MULTIPLIER_EQUITY": 0.8,
             "MR_RSI_OVERSOLD": 35.0,
             "MR_RSI_OVERBOUGHT": 65.0,
+            "ROUTING_TREND_PULLBACK": "ENABLED",
+            "ROUTING_MEAN_REVERSION": "LONG_ONLY",
         },
         "Bearish Chop": {
             "AI_RISK_MULTIPLIER_EQUITY": 0.5,
             "MR_RSI_OVERSOLD": 30.0,
             "MR_RSI_OVERBOUGHT": 70.0,
+            "ROUTING_TREND_PULLBACK": "DISABLED",
+            "ROUTING_MEAN_REVERSION": "REDUCED",
         },
         "Bearish Volatile": {
             "AI_RISK_MULTIPLIER_EQUITY": 0.5,
             "MR_RSI_OVERSOLD": 25.0,
             "MR_RSI_OVERBOUGHT": 75.0,
+            "ROUTING_TREND_PULLBACK": "SHORT_ONLY",
+            "ROUTING_MEAN_REVERSION": "TINY_FAILED_EXTENSIONS_ONLY",
         },
     },
     "Crypto": {
@@ -578,22 +718,48 @@ REGIME_PROFILES = {
             "MB_ADX_THRESHOLD": 30.0,
         },
     },
-    "Commodity": {
+    "Gold": {
         "Bullish Calm": {
-            "AI_RISK_MULTIPLIER_COMMODITY": 1.0,
-            "TF_EMA_FAST": 20,
+            "AI_RISK_MULTIPLIER_GOLD": 1.0,
+            "GLD_EMA_FAST": 20,
         },
         "Bullish Volatile": {
-            "AI_RISK_MULTIPLIER_COMMODITY": 0.8,
-            "TF_EMA_FAST": 20,
+            "AI_RISK_MULTIPLIER_GOLD": 0.8,
+            "GLD_EMA_FAST": 20,
+        },
+        "Range-Bound Calm": {
+            "AI_RISK_MULTIPLIER_GOLD": 1.0,
+            "GLD_EMA_FAST": 15,
         },
         "Bearish Chop": {
-            "AI_RISK_MULTIPLIER_COMMODITY": 0.5,
-            "TF_EMA_FAST": 15,
+            "AI_RISK_MULTIPLIER_GOLD": 0.5,
+            "GLD_EMA_FAST": 15,
         },
         "Bearish Volatile": {
-            "AI_RISK_MULTIPLIER_COMMODITY": 0.5,
-            "TF_EMA_FAST": 10,
+            "AI_RISK_MULTIPLIER_GOLD": 0.5,
+            "GLD_EMA_FAST": 10,
+        },
+    },
+    "Broad Commodity": {
+        "Bullish Calm": {
+            "AI_RISK_MULTIPLIER_BROAD_COMMODITY": 1.0,
+            "PDBC_EMA_FAST": 20,
+        },
+        "Bullish Volatile": {
+            "AI_RISK_MULTIPLIER_BROAD_COMMODITY": 0.8,
+            "PDBC_EMA_FAST": 20,
+        },
+        "Range-Bound Calm": {
+            "AI_RISK_MULTIPLIER_BROAD_COMMODITY": 1.0,
+            "PDBC_EMA_FAST": 15,
+        },
+        "Bearish Chop": {
+            "AI_RISK_MULTIPLIER_BROAD_COMMODITY": 0.5,
+            "PDBC_EMA_FAST": 15,
+        },
+        "Bearish Volatile": {
+            "AI_RISK_MULTIPLIER_BROAD_COMMODITY": 0.5,
+            "PDBC_EMA_FAST": 10,
         },
     },
 }

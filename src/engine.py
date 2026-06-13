@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+import json
 from typing import Optional
 
 from datetime import datetime, timezone
@@ -24,8 +25,12 @@ from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.trend_pullback import TrendPullbackStrategy
 from src.risk_manager import RiskManager
 from src.alpaca_trader import AlpacaTrader
-from src.macro_filter import SEVERITY_FLATTEN_ALL, SEVERITY_NORMAL, SEVERITY_NO_NEW_ENTRIES
-from src.database import init_db, log_trade
+from src.macro_filter import MacroFilter
+from src.database import init_db, log_trade, get_strategy_expectancy
+try:
+    from src.trailing_stops import calculate_trailing_stop, get_strategy_trailing_logic
+except ImportError:
+    from trailing_stops import calculate_trailing_stop, get_strategy_trailing_logic
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +77,6 @@ class TradingEngine:
         self.ml_model.start_training_async()
 
         # Macro Kill Switch
-        from src.macro_filter import MacroFilter
         self.macro_filter = MacroFilter()
 
         # Strategy instances
@@ -108,6 +112,8 @@ class TradingEngine:
 
         # Position tracking for trailing/time stops
         self._position_state: dict[str, dict] = {}
+        # Cycle level cached DataFrames to avoid redundant fetches
+        self._cycle_dfs: dict[str, pd.DataFrame] = {}
 
     # ──────────────────────────────────────────────────────────────────────
     # Public entry point
@@ -169,6 +175,7 @@ class TradingEngine:
 
     def _scan_cycle(self) -> None:
         """Check each instrument, fetch data, run strategy, and execute."""
+        self._cycle_dfs = {}
         self.cycle_count += 1
         now = time.time()
 
@@ -185,7 +192,11 @@ class TradingEngine:
                 elif strategy_name == "momentum_breakout":
                     regime = self.ai_tuner.current_regimes.get("Crypto")
                 elif strategy_name == "trend_following":
-                    regime = self.ai_tuner.current_regimes.get("Commodity")
+                    ticker = instrument["ticker"]
+                    if ticker == "GLD":
+                        regime = self.ai_tuner.current_regimes.get("Gold")
+                    elif ticker == "PDBC":
+                        regime = self.ai_tuner.current_regimes.get("Broad Commodity")
 
                 if regime and "Volatile" in regime:
                     instrument["interval_seconds"] = max(60, int(instrument.get("_base_interval", instrument["interval_seconds"]) * config.ADAPTIVE_SCAN_FAST_MULT))
@@ -197,45 +208,88 @@ class TradingEngine:
         # Keep risk manager in sync with user config (sector multipliers are now handled inside the risk manager per-trade)
         self.risk_manager.max_risk_pct = config.MAX_RISK_PCT
 
-        # Macro Kill Switch — consume severity levels from check_event()
+        # Macro Kill Switch — consume events from check_event()
+        blocked_entry_tickers = set()
         if config.MACRO_FILTER_ENABLED:
-            severity, event_name = self.macro_filter.check_event(now)
-            if severity == SEVERITY_FLATTEN_ALL:
-                logger.info(
-                    "Macro Kill Switch: %s active (severity=FLATTEN_ALL). Flattening all positions.",
-                    event_name,
-                )
-                # Close all active positions
-                try:
-                    positions = self.trader.get_positions()
-                    for pos in positions:
-                        sym = pos["symbol"]
-                        logger.info("  Closing position %s due to macro flatten", sym)
-                        try:
-                            self.trader._client.close_position(sym)
-                        except Exception as exc:
-                            logger.error("Failed to close %s: %s", sym, exc)
-                except Exception as exc:
-                    logger.warning("Could not list positions for flatten: %s", exc)
-                # Clear position state tracking
-                self._position_state.clear()
-                return
-            elif severity == SEVERITY_NO_NEW_ENTRIES:
-                logger.info(
-                    "Macro Kill Switch: %s active (severity=NO_NEW_ENTRIES). Skipping new entries.",
-                    event_name,
-                )
-                return
+            active_events = self.macro_filter.check_event(now)
+            for event in active_events:
+                event_name = event["event_name"]
+                affected = event.get("affected_assets", [])
+                actions = event.get("actions", [])
+                
+                # Check for flattening action
+                should_flatten_intraday = "flatten_intraday_only" in actions
+                
+                # Close/flatten positions if required
+                if should_flatten_intraday and self.trader is not None:
+                    try:
+                        positions = self.trader.get_positions()
+                        for pos in positions:
+                            sym = pos["symbol"]
+                            normal_sym = sym.replace("-USD", "")
+                            
+                            # Check if the asset is affected by this event
+                            is_affected = False
+                            if "all" in affected:
+                                is_affected = True
+                            else:
+                                normalized_affected = [a.replace("-USD", "") for a in affected]
+                                if normal_sym in normalized_affected:
+                                    is_affected = True
+                                    
+                            if is_affected:
+                                # Retrieve position state to check if it's intraday
+                                state = self._position_state.get(sym, {})
+                                strat = state.get("strategy")
+                                is_intra = False
+                                if strat in ("mean_reversion", "trend_pullback", "momentum_breakout"):
+                                    is_intra = True
+                                elif normal_sym in ("SPY", "QQQ", "BTC"):
+                                    is_intra = True
+                                    
+                                if is_intra:
+                                    logger.info(
+                                        "Macro Filter: Closing position %s due to %s event flatten action",
+                                        sym,
+                                        event_name,
+                                    )
+                                    try:
+                                        self._close_and_log_position(
+                                            sym,
+                                            state,
+                                            pos["current_price"],
+                                            pos["unrealized_pl"],
+                                            f"macro_{event_name.lower()}",
+                                        )
+                                        if sym in self._position_state:
+                                            del self._position_state[sym]
+                                    except Exception as exc:
+                                        logger.error("Failed to close %s: %s", sym, exc)
+                    except Exception as exc:
+                        logger.warning("Could not process flatten for active event %s: %s", event_name, exc)
+                
+                # Check for "no new entries" action
+                if "no_new_entries" in actions:
+                    if "all" in affected:
+                        blocked_entry_tickers.add("all")
+                    else:
+                        for asset in affected:
+                            blocked_entry_tickers.add(asset)
 
         self._cleanup_stale_orders()
         self._manage_positions()
 
+        cycle_signals = []
+
         for instrument in self.instruments:
+            ticker = instrument["ticker"]
+            if "all" in blocked_entry_tickers or ticker in blocked_entry_tickers or ticker.replace("-USD", "") in blocked_entry_tickers:
+                logger.info("Macro Filter: skipping scan/entry for %s due to active macro event", ticker)
+                continue
+
             elapsed = now - instrument.get("last_scan", 0)
             if elapsed < instrument["interval_seconds"]:
                 continue
-
-            ticker = instrument["ticker"]
             strategy = instrument["strategy"]
 
             try:
@@ -244,6 +298,12 @@ class TradingEngine:
                     period=strategy.period,
                     interval=strategy.timeframe,
                 )
+                if df is not None:
+                    self._cycle_dfs[ticker] = df
+                    if "-USD" in ticker:
+                        self._cycle_dfs[ticker.replace("-USD", "")] = df
+                    else:
+                        self._cycle_dfs[ticker + "-USD"] = df
                 if df is None or len(df) < 20:
                     logger.warning(
                         "Insufficient data for %s (%s)", ticker, strategy.timeframe
@@ -257,6 +317,46 @@ class TradingEngine:
                 if signal is None:
                     logger.debug("No signal for %s", ticker)
                     continue
+                    
+                # Strategy Routing based on Regime Profile
+                if strategy.name == "trend_pullback":
+                    routing = getattr(config, "ROUTING_TREND_PULLBACK", "ENABLED")
+                    if routing == "DISABLED":
+                        logger.debug("Signal rejected: trend_pullback disabled in current regime.")
+                        continue
+                    elif routing == "LONG_ONLY" and signal.direction != "BUY":
+                        logger.debug("Signal rejected: trend_pullback restricted to long-only.")
+                        continue
+                    elif routing == "SHORT_ONLY" and signal.direction != "SELL":
+                        logger.debug("Signal rejected: trend_pullback restricted to short-only.")
+                        continue
+                    elif routing == "REDUCED":
+                        # Simulate reducing risk or confidence
+                        signal.confidence *= 0.5
+                
+                elif strategy.name == "mean_reversion":
+                    routing = getattr(config, "ROUTING_MEAN_REVERSION", "BOTH")
+                    if routing == "DISABLED":
+                        logger.debug("Signal rejected: mean_reversion disabled in current regime.")
+                        continue
+                    elif routing == "LONG_ONLY" and signal.direction != "BUY":
+                        logger.debug("Signal rejected: mean_reversion restricted to long-only.")
+                        continue
+                    elif routing == "SHORT_ONLY" and signal.direction != "SELL":
+                        logger.debug("Signal rejected: mean_reversion restricted to short-only.")
+                        continue
+                    elif routing == "LONG_ONLY_HIGH_QUALITY":
+                        if signal.direction != "BUY":
+                            logger.debug("Signal rejected: mean_reversion restricted to long-only.")
+                            continue
+                        if signal.confidence < 70.0:
+                            logger.debug("Signal rejected: mean_reversion requires high quality in this regime.")
+                            continue
+                    elif routing == "TINY_FAILED_EXTENSIONS_ONLY":
+                        # Significantly reduce confidence/risk for this trade
+                        signal.confidence *= 0.3
+                    elif routing == "REDUCED":
+                        signal.confidence *= 0.5
 
                 self.signals_today += 1
                 logger.info(
@@ -267,20 +367,48 @@ class TradingEngine:
                     signal.reason,
                 )
 
-                self._execute_signal(signal, df)
+                cycle_signals.append((signal, df))
 
             except Exception as exc:
                 logger.error("Error scanning %s: %s", ticker, exc)
                 instrument["last_scan"] = now
+
+        # Rank and filter signals before execution
+        # Groups by capital bucket (equity, crypto, commodity, general),
+        # scores each on expected EV, regime fit, liquidity, ML agreement,
+        # and picks the highest-ranked per bucket.
+        if cycle_signals:
+            ranked_signals = self._rank_and_filter_signals(cycle_signals)
+            for signal, df in ranked_signals:
+                try:
+                    self._execute_signal(signal, df)
+                except Exception as exc:
+                    logger.error("Error executing ranked signal %s: %s", signal.ticker, exc)
 
         # Periodic housekeeping
         if self.cycle_count % 10 == 0:
             try:
                 if self.trader is not None:
                     self.trader.sync_closed_trades()
-                    # Drain ML feedback from closed trades
+                    # Drain ML feedback from closed trades and feed into veto tracker
                     if self.ml_model is not None:
-                        self.trader.drain_ml_feedback_queue()
+                        feedback_records = self.trader.drain_ml_feedback_queue()
+                        for fb in feedback_records:
+                            ticker = fb.get("ticker", "")
+                            fb_strategy = (fb.get("metadata") or {}).get("strategy") \
+                                          or fb.get("signal_reason", "unknown")
+                            regime = self._get_signal_regime(ticker)
+                            reason = fb.get("result_reason", "unknown")
+                            try:
+                                self.ml_model._track_veto_outcome(
+                                    strategy=fb_strategy,
+                                    regime=regime,
+                                    ticker=ticker,
+                                    sizing_multiplier=1.0,  # not available in feedback
+                                    outcome=reason,
+                                )
+                            except Exception as tx:
+                                logger.warning("Failed to track veto outcome: %s", tx)
             except Exception as exc:
                 logger.warning("Trade sync / ML feedback drain failed: %s", exc)
 
@@ -291,16 +419,179 @@ class TradingEngine:
     # Execute a signal through the risk + trading pipeline
     # ──────────────────────────────────────────────────────────────────────
 
-    def _get_signal_regime(self, strategy_name: str) -> str:
-        """Map a strategy name to its current market regime from the AI Tuner."""
-        if strategy_name in ("mean_reversion", "trend_pullback"):
+    def _get_signal_regime(self, ticker: str) -> str:
+        """Map a ticker to its current market regime from the AI Tuner."""
+        if ticker in ("SPY", "QQQ"):
             return self.ai_tuner.current_regimes.get("Equity", "unknown")
-        elif strategy_name == "momentum_breakout":
+        elif ticker in ("BTC-USD", "BTCUSD"):
             return self.ai_tuner.current_regimes.get("Crypto", "unknown")
-        elif strategy_name == "trend_following":
-            return self.ai_tuner.current_regimes.get("Commodity", "unknown")
+        elif ticker == "GLD":
+            return self.ai_tuner.current_regimes.get("Gold", "unknown")
+        elif ticker == "PDBC":
+            return self.ai_tuner.current_regimes.get("Broad Commodity", "unknown")
         return "unknown"
 
+
+    @staticmethod
+    def _get_default_time_stop_bars(strategy_name: str, ticker: str = "") -> int:
+        """Return strategy-specific time_stop_bars based on codex.md item 13.
+
+        Mean reversion  :  4–8 bars on 15m  → use 6
+        Trend pullback  :  8–12 bars on 15m → use 10
+        BTC breakout    :  6–12 bars on 1h  → use 8
+        GLD trend       : 10–20 bars on 4h  → use 15
+        PDBC trend      :  6–12 bars on 4h  → use 8
+        """
+        mapping: dict[str, int] = {
+            "mean_reversion": 6,
+            "trend_pullback": 10,
+            "momentum_breakout": 8,
+        }
+        # Sub-differentiate trend_following by ticker
+        if strategy_name == "trend_following":
+            if ticker == "GLD":
+                return 15
+            elif ticker == "PDBC":
+                return 8
+            return 12  # conservative mid-range fallback
+        return mapping.get(strategy_name, 10)
+
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Signal Ranking Layer — score, bucket, select best per allocation pool
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _rank_and_filter_signals(
+        self,
+        signals_with_data: list[tuple[StrategySignal, Optional[pd.DataFrame]]],
+    ) -> list[tuple[StrategySignal, Optional[pd.DataFrame]]]:
+        """Rank signals by composite score and return the single highest-scored signal.
+
+        Each signal receives a composite score based on:
+          · Expected EV    (historical R-multiple from the trade log)
+          · Regime fit     (how well the strategy aligns with the current market regime)
+          · Liquidity      (inverse of ATR/price — lower volatility = more liquid)
+          · ML agreement   (sizing_multiplier produced by the ML model)
+          · Slippage       (spread estimate penalty)
+
+        Only the single highest-scored signal across all instruments is returned.
+        """
+        # Collect all scored signals in a flat list
+        scored_signals: list[tuple[float, StrategySignal, Optional[pd.DataFrame]]] = []
+
+        for signal, df in signals_with_data:
+            # 1. Expected EV from database
+            alpaca_ticker = self.risk_manager._resolve_ticker(signal.ticker)
+            regime = self._get_signal_regime(signal.ticker)
+
+            ev_r, sample_size = get_strategy_expectancy(
+                signal.strategy_name, signal.direction,
+                symbol=alpaca_ticker, regime=regime,
+            )
+            if sample_size < config.MIN_EXPECTANCY_SAMPLES:
+                ev_r, sample_size = get_strategy_expectancy(
+                    signal.strategy_name, signal.direction,
+                )
+            expected_ev = ev_r
+
+            # 2. Regime fit score (0–1)
+            regime_fit = self._calc_regime_fit_score(regime, signal.strategy_name)
+
+            # 3. Liquidity score (0–1, higher = more liquid)
+            atr_pct = (signal.atr / signal.entry) if signal.atr > 0 and signal.entry > 0 else 0.0
+            # Linear falloff: 0% ATR → 1.0, 5% ATR → 0.0
+            liquidity_score = max(0.0, 1.0 - atr_pct / 0.05)
+
+            # 4. ML agreement — fetch sizing_multiplier from the model and attach to signal
+            ml_agreement = 0.0
+            if config.ML_VETO_ENABLED and self.ml_model is not None and df is not None and len(df) >= 40:
+                try:
+                    ml_result = self.ml_model.evaluate_signal(df, signal.direction)
+                    sizing_multiplier = ml_result.get("sizing_multiplier", 1.0)
+                    # Attach sizing_multiplier to the signal for later consumption
+                    signal.sizing_multiplier = sizing_multiplier
+                    # sizing_multiplier ∈ [0, ~2], centred at 1.0.
+                    # Convert to agreement offset:  1.0 → 0,  1.5 → +0.5,  0.5 → -0.5
+                    ml_agreement = sizing_multiplier - 1.0
+                except Exception:
+                    pass
+
+            # 5. Slippage penalty (spread estimate)
+            slippage_penalty = atr_pct * 0.1
+
+            # Composite score
+            composite_score = expected_ev + regime_fit + liquidity_score + ml_agreement - slippage_penalty
+
+            logger.info(
+                "[RANK-SIGNAL] %s %s (%s) | EV: %+.3f | RegimeFit: %.3f | "
+                "Liq: %.3f | ML: %+.3f | Slip: %.4f | Score: %+.4f",
+                signal.direction, signal.ticker, signal.strategy_name,
+                expected_ev, regime_fit, liquidity_score,
+                ml_agreement, slippage_penalty, composite_score,
+            )
+
+            scored_signals.append((composite_score, signal, df))
+
+        # ---- Select the single highest-scored signal overall ----
+        if not scored_signals:
+            return []
+
+        scored_signals.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_signal, best_df = scored_signals[0]
+
+        if len(scored_signals) > 1:
+            logger.info(
+                "[RANK-SELECT] Selected %s %s %s (score=%+.4f) over %d competing signal(s)",
+                best_signal.direction, best_signal.ticker, best_signal.strategy_name,
+                best_score, len(scored_signals) - 1,
+            )
+
+        return [(best_signal, best_df)]
+
+    # ──────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _calc_regime_fit_score(regime: str, strategy_name: str) -> float:
+        """Return a 0–1 score indicating how well *strategy* fits *regime*.
+
+        Regime labels come from the AI Tuner and are one of:
+            Bullish Calm, Bullish Volatile, Range-Bound Calm,
+            Bearish Chop, Bearish Volatile, or unknown.
+        """
+        regime_lower = regime.lower().strip()
+
+        if strategy_name == "mean_reversion":
+            # Mean reversion thrives in range-bound / choppy markets
+            # and suffers in strong trending / volatile regimes.
+            fit_map = {
+                "range-bound calm": 1.0,
+                "bearish chop": 0.8,
+                "bullish calm": 0.6,
+                "bullish volatile": 0.3,
+                "bearish volatile": 0.1,
+            }
+        elif strategy_name in ("trend_pullback", "trend_following"):
+            # Trend strategies need directional movement
+            fit_map = {
+                "bullish calm": 1.0,
+                "bullish volatile": 0.8,
+                "range-bound calm": 0.6,
+                "bearish chop": 0.3,
+                "bearish volatile": 0.1,
+            }
+        elif strategy_name == "momentum_breakout":
+            # Momentum breakout requires strong trending conditions
+            fit_map = {
+                "bullish calm": 1.0,
+                "bullish volatile": 0.9,
+                "range-bound calm": 0.5,
+                "bearish chop": 0.2,
+                "bearish volatile": 0.0,
+            }
+        else:
+            fit_map = {}
+
+        return fit_map.get(regime_lower, 0.5)
 
     def _execute_signal(self, signal: StrategySignal, df: pd.DataFrame = None) -> None:
         """Run approval pipeline and — if approved — place the order.
@@ -378,14 +669,167 @@ class TradingEngine:
                     state['stop_loss'] = signal.stop_loss
                     return
 
+        # Estimate live quote if available (placeholder until L1 data feed is wired)
+        # Using a conservative spread estimate (0.5% of ATR or 1 tick)
+        estimated_spread = max(0.01, signal.atr * 0.005)
+        mock_quote = {"bid": signal.entry - estimated_spread/2, "ask": signal.entry + estimated_spread/2}
+
+        # ML Veto Filter — use pre-computed sizing_multiplier from ranking phase
+        ml_vetoed = False
+        reason_veto = ""
+        ml_multiplier = 1.0
+        ml_action = "NEUTRAL"
+        ml_action_reason = ""
+        sizing_multiplier = getattr(signal, 'sizing_multiplier', 1.0)
+        ml_regime = self._get_signal_regime(signal.ticker)
+
+        if config.ML_VETO_ENABLED and self.ml_model is not None:
+            try:
+                # sizing_multiplier ∈ [0, ~2], centred at 1.0
+                #   0      → strong disagreement (veto)
+                #  < 1.0  → mild disagreement (reduce)
+                #  > 1.0  → strong agreement (boost)
+                #  = 1.0  → neutral
+                if sizing_multiplier == 0.0:
+                    ml_vetoed = True
+                    ml_action = "VETO"
+                    ml_action_reason = f"Strong ML disagreement: sizing_multiplier is 0.0"
+                    reason_veto = ml_action_reason
+                elif sizing_multiplier < 1.0:
+                    ml_multiplier = sizing_multiplier
+                    ml_action = "REDUCE"
+                    ml_action_reason = f"Mild ML disagreement: sizing_multiplier={sizing_multiplier:.3f}"
+                elif sizing_multiplier > 1.0:
+                    ml_multiplier = sizing_multiplier
+                    ml_action = "BOOST"
+                    ml_action_reason = f"ML agreement: sizing_multiplier={sizing_multiplier:.3f}"
+                else:
+                    ml_action = "NEUTRAL"
+                    ml_action_reason = "ML neutral: sizing_multiplier=1.0"
+            except Exception as exc:
+                logger.warning("ML veto check failed (allowing trade): %s", exc)
+
+        # ── Helper to build a consistent ML action tracking log ────────
+        def _build_ml_tracking_entry(action: str, action_reason: str,
+                                      mult: float, notional_val: float = 0.0) -> dict:
+            return {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "ticker": signal.ticker,
+                "direction": signal.direction,
+                "strategy": signal.strategy_name,
+                "regime": ml_regime,
+                "entry": signal.entry,
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit,
+                "confidence": signal.confidence,
+                "notional": notional_val,
+                "ml_multiplier": mult,
+                "sizing_multiplier": sizing_multiplier,
+                "action": action,
+                "reason": action_reason,
+            }
+
+        if ml_vetoed:
+            # Calculate hypothetical sizing for tracking virtual veto
+            original_notional = self.risk_manager.calculate_position_size(
+                signal, equity, signal_regime=self._get_signal_regime(signal.ticker)
+            )
+            logger.warning(
+                "[ML VETO] %s %s vetoed by ML (sizing_multiplier=%.3f, direction=%s): %s",
+                signal.direction, signal.ticker,
+                sizing_multiplier, signal.direction,
+                reason_veto
+            )
+            
+            # Register in order_journal with is_virtual_veto: True
+            virtual_id = f"virtual_{signal.ticker}_{int(time.time())}"
+            alpaca_ticker = self.trader.map_ticker(signal.ticker)
+            meta = {
+                "strategy": signal.strategy_name,
+                "timeframe": signal.timeframe,
+                "confidence": signal.confidence,
+                "reason": signal.reason,
+                "atr": signal.atr,
+                "regime": self._get_signal_regime(signal.ticker),
+            }
+            self.trader._state.setdefault("order_journal", {})[virtual_id] = {
+                "order_id": virtual_id,
+                "ticker": signal.ticker,
+                "symbol": alpaca_ticker,
+                "side": signal.direction.upper(),
+                "entry": float(signal.entry),
+                "stop_loss": float(signal.stop_loss),
+                "take_profit": float(signal.take_profit),
+                "confidence": float(signal.confidence),
+                "submitted_ts": time.time(),
+                "settled": False,
+                "is_virtual_veto": True,
+                "notional": original_notional,
+                "metadata": meta,
+            }
+            self.trader._save_state()
+
+            # Save virtual trade / veto log to vetoed_signals_tracker.jsonl
+            try:
+                entry = _build_ml_tracking_entry("VETO", reason_veto,
+                                                  ml_multiplier, original_notional)
+                with open("vetoed_signals_tracker.jsonl", "a") as f:
+                    f.write(json.dumps(entry) + "\n")
+            except Exception as e:
+                logger.exception("Failed to write virtual trade log: %s", e)
+            return
+
         approved, notional, reason = self.risk_manager.approve(
             signal, equity, positions, active_orders,
             position_state=self._position_state,
-            signal_regime=self._get_signal_regime(signal.strategy_name),
+            signal_regime=self._get_signal_regime(signal.ticker),
+            df=df, quote=mock_quote
         )
 
+        # Apply sizing_multiplier to approved notional
+        if approved and ml_multiplier != 1.0:
+            original_notional = notional
+            notional *= ml_multiplier
+            if ml_multiplier > 1.0:
+                max_allowed = equity * self.risk_manager.max_position_pct
+                if notional > max_allowed:
+                    notional = max_allowed
+            notional = max(1.0, round(notional, 2))
+            if ml_multiplier < 1.0:
+                ml_action = "REDUCE"
+                ml_action_reason = f"Reduced from ${original_notional:.2f} to ${notional:.2f} (sizing_multiplier={sizing_multiplier:.3f})"
+                logger.info(
+                    "[ML MILD DISAGREEMENT] %s %s: reducing position size from $%.2f to $%.2f (sizing_multiplier=%.3f)",
+                    signal.direction, signal.ticker, original_notional, notional, sizing_multiplier
+                )
+            else:
+                ml_action = "BOOST"
+                ml_action_reason = f"Boosted from ${original_notional:.2f} to ${notional:.2f} (sizing_multiplier={sizing_multiplier:.3f})"
+                logger.info(
+                    "[ML AGREEMENT BOOST] %s %s: boosting position size from $%.2f to $%.2f (sizing_multiplier=%.3f)",
+                    signal.direction, signal.ticker, original_notional, notional, sizing_multiplier
+                )
+        elif approved:
+            ml_action = "NEUTRAL"
+            ml_action_reason = f"ML neutral: sizing_multiplier={sizing_multiplier:.3f}"
+            logger.info(
+                "[ML OK] %s %s passed/scaled by ML filter (sizing_multiplier=%.3f, final_notional=%.2f)",
+                signal.direction, signal.ticker,
+                sizing_multiplier, notional
+            )
+
+        # Log every ML action (VETO already logged above) to the tracking file
+        if approved:
+            try:
+                track_entry = _build_ml_tracking_entry(
+                    ml_action, ml_action_reason, ml_multiplier, notional
+                )
+                with open("vetoed_signals_tracker.jsonl", "a") as f:
+                    f.write(json.dumps(track_entry) + "\n")
+            except Exception as e:
+                logger.exception("Failed to write ML action tracking log: %s", e)
+
         # --- SIGNAL TELEMETRY DUMP ---
-        import json
         with open("overnight_signals.jsonl", "a") as f:
             f.write(json.dumps({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -403,34 +847,6 @@ class TradingEngine:
                 "[REJECTED] %s %s: %s", signal.direction, signal.ticker, reason
             )
             return
-
-        # ML Veto Filter
-        if config.ML_VETO_ENABLED and self.ml_model is not None:
-            try:
-                ticker_for_ml = signal.ticker
-                if df is not None and len(df) >= 40:
-                    df_for_ml = df
-                else:
-                    df_for_ml = fetch_ohlcv(ticker_for_ml, period="5d", interval="15m")
-                if df_for_ml is not None and len(df_for_ml) >= 40:
-                    ml_result = self.ml_model.evaluate_signal(df_for_ml, signal.direction)
-                    if ml_result.get("veto", False):
-                        logger.info(
-                            "[ML VETO] %s %s vetoed by ML (prob_up=%.3f, confidence=%.1f)",
-                            signal.direction, signal.ticker,
-                            ml_result.get("prob_up", 0.5),
-                            ml_result.get("confidence", 0.0),
-                        )
-                        return
-                    else:
-                        logger.info(
-                            "[ML OK] %s %s passed ML filter (prob_up=%.3f, confidence=%.1f)",
-                            signal.direction, signal.ticker,
-                            ml_result.get("prob_up", 0.5),
-                            ml_result.get("confidence", 0.0),
-                        )
-            except Exception as exc:
-                logger.warning("ML veto check failed (allowing trade): %s", exc)
 
         if config.DRY_RUN:
             logger.info(
@@ -460,7 +876,7 @@ class TradingEngine:
                 "confidence": signal.confidence,
                 "reason": signal.reason,
                 "atr": signal.atr,
-                "regime": self._get_signal_regime(signal.strategy_name),
+                "regime": self._get_signal_regime(signal.ticker),
             },
         )
 
@@ -476,7 +892,11 @@ class TradingEngine:
             st['qty'] = notional / signal.entry
             st['side'] = signal.direction
             st['strategy'] = signal.strategy_name
-            st['regime'] = self._get_signal_regime(signal.strategy_name)
+            st['regime'] = self._get_signal_regime(signal.ticker)
+            # time_stop_bars is already set strategy-specifically by each strategy's analyze()
+            st['time_stop_bars'] = signal.time_stop_bars
+            st['trailing_stop_logic'] = getattr(signal, 'trailing_stop_logic', 'default')
+            st['timeframe'] = signal.timeframe
             logger.info(
                 "[ORDER PLACED] %s %s $%.2f | ID: %s",
                 signal.direction,
@@ -531,6 +951,8 @@ class TradingEngine:
             Percentage of the position to close (e.g. ``"50"``). When
             ``None`` the entire position is closed.
         """
+        if self.trader is None:
+            return False
         side = state.get('side', 'long')
         _entry = state.get('entry_price', current_price)
 
@@ -651,19 +1073,36 @@ class TradingEngine:
             # Initialise tracking entry if new position or if missing tracking fields
             if sym not in self._position_state or 'open_ts' not in self._position_state[sym]:
                 _state = self._position_state.setdefault(sym, {})
-                
-                # Recover missing fields after restart
+
+                # Recover missing fields after restart using asset-specific fallback
+                # logic from the risk manager (see _FALLBACK_RISK_MAP for ranges).
                 if 'entry_price' not in _state:
                     _state['entry_price'] = pos.get('avg_entry_price', current_price)
                 if 'qty' not in _state:
                     _state['qty'] = pos.get('qty', 0.0)
                 if 'stop_loss' not in _state:
-                    # Conservative fallback stop
-                    _state['stop_loss'] = current_price * 0.95 if side == 'long' else current_price * 1.05
+                    # Asset-specific fallback stop distance — uses the midpoints
+                    # of the configured ranges (2-3% SPY/QQQ, 8-12% BTC, 3-5% GLD,
+                    # 5-8% PDBC) from RiskManager._FALLBACK_RISK_MAP.
+                    fallback_pct = self.risk_manager.get_fallback_risk_pct(sym)
+                    _state['stop_loss'] = (
+                        current_price * (1.0 - fallback_pct) if side == 'long'
+                        else current_price * (1.0 + fallback_pct)
+                    )
+                if 'take_profit' not in _state:
+                    # Use a symmetric 1:1 risk-reward as a conservative TP fallback
+                    _state['take_profit'] = (
+                        current_price + (current_price - _state['stop_loss']) if side == 'long'
+                        else current_price - (_state['stop_loss'] - current_price)
+                    )
+                if 'side' not in _state:
+                    _state['side'] = side
                 if 'strategy' not in _state:
                     _state['strategy'] = 'unknown_restarted'
                 if 'regime' not in _state:
                     _state['regime'] = 'unknown'
+                if 'notional' not in _state:
+                    _state['notional'] = _state.get('qty', 0.0) * _state.get('entry_price', current_price)
 
                 entry = _state['entry_price']
                 _state.update({
@@ -674,11 +1113,82 @@ class TradingEngine:
 
             state = self._position_state[sym]
 
+            # If missing fields on state, populate them (for restart / legacy recovery):
+            # Use strategy-specific defaults per codex.md item 13.
+            if 'time_stop_bars' not in state:
+                state['time_stop_bars'] = self._get_default_time_stop_bars(
+                    state.get('strategy', 'unknown'), sym
+                )
+            if 'trailing_stop_logic' not in state:
+                strat_name = state.get('strategy', 'unknown_restarted')
+                state['trailing_stop_logic'] = get_strategy_trailing_logic(strat_name, sym)
+            if 'timeframe' not in state:
+                # Default timeframe based on asset class
+                if "GLD" in sym or "PDBC" in sym:
+                    state['timeframe'] = '4h'
+                elif "BTC" in sym or "ETH" in sym:
+                    state['timeframe'] = '1h'
+                else:
+                    state['timeframe'] = '15m'
+
             # Update highest/lowest
             if current_price > state['highest']:
                 state['highest'] = current_price
             if current_price < state['lowest']:
                 state['lowest'] = current_price
+
+            # ── Dynamic Stop Loss Update (Trailing Stop Logic) ──
+            trailing_logic = state.get('trailing_stop_logic', 'default')
+            # Asset-class-aware timeframe fallback for trailing stop retrieval
+            _tf_default = '15m'
+            if "GLD" in sym or "PDBC" in sym:
+                _tf_default = '4h'
+            elif "BTC" in sym or "ETH" in sym:
+                _tf_default = '1h'
+            tf = state.get('timeframe', _tf_default)
+            
+            old_sl = state.get('stop_loss')
+            
+            # Reuse cached DF if possible, or fetch from Alpaca
+            df = None
+            if trailing_logic in ("sma20_or_ema", "donchian", "vwap"):
+                df = self._cycle_dfs.get(sym)
+                if df is None:
+                    df = self._cycle_dfs.get(sym.replace("-USD", ""))
+                if df is None:
+                    try:
+                        df = fetch_ohlcv(sym, period="5d", interval=tf)
+                        if df is not None:
+                            self._cycle_dfs[sym] = df
+                    except Exception as e:
+                        logger.warning("Failed to fetch OHLCV for %s: %s", sym, e)
+
+            try:
+                new_sl = calculate_trailing_stop(
+                    logic_type=trailing_logic,
+                    current_price=current_price,
+                    current_sl=old_sl,
+                    direction=side,
+                    df=df,
+                    atr=state.get('atr_at_entry', 0.0),
+                    entry_price=state.get('entry_price', current_price),
+                    tp_filled=state.get('tp_filled', False),
+                    highest_price=state.get('highest'),
+                    lowest_price=state.get('lowest'),
+                    ticker=sym,
+                )
+                if new_sl is not None:
+                    state['stop_loss'] = new_sl
+            except Exception as e:
+                logger.warning("Failed to calculate trailing stop for %s: %s", sym, e)
+
+            # Sync with broker if stop loss changed and we have a trader instance
+            if state.get('stop_loss') != old_sl and self.trader is not None:
+                try:
+                    tp_val = state.get('take_profit', current_price * 1.5 if side == 'long' else current_price * 0.5)
+                    self.trader.update_position_exits(sym, take_profit=tp_val, stop_loss=state['stop_loss'])
+                except Exception as exc:
+                    logger.warning("Failed to sync trailing stop-loss update with Alpaca for %s: %s", sym, exc)
 
             # ── Synthetic Bracket Management (Crypto & Extended Hours) ──
             has_broker_sl = broker_exits.get(sym, {}).get("stop")
@@ -705,36 +1215,24 @@ class TradingEngine:
                         state['qty'] = state.get('qty', 0) * 0.5
                         # We keep tracking it as a runner now.
 
-            # ── Trailing Stop ──────────────────────────────────────────
-            # Use ATR-based trailing if available, else fallback to percentage
-            if 'atr_at_entry' in state and state['atr_at_entry'] > 0:
-                trail_dist = state['atr_at_entry'] * config.TRAILING_STOP_PCT
+            # ── Time Stop (Strategy-specific bars converted to hours) ──
+            time_stop_bars = state.get('time_stop_bars', 10)
+            
+            # Simple timeframe to hours parsing
+            tf_lower = tf.lower()
+            if tf_lower.endswith('m'):
+                bar_hours = float(tf_lower[:-1]) / 60.0
+            elif tf_lower.endswith('h'):
+                bar_hours = float(tf_lower[:-1])
+            elif tf_lower.endswith('d'):
+                bar_hours = float(tf_lower[:-1]) * 24.0
             else:
-                trail_dist = current_price * 0.01 * config.TRAILING_STOP_PCT
-
-            should_close = False
-            if side == 'long' and current_price < state['highest'] - trail_dist:
-                should_close = True
-            elif side == 'short' and current_price > state['lowest'] + trail_dist:
-                should_close = True
-
-            if should_close:
-                logger.info("Closing %s due to trailing stop", sym)
-                if self._close_and_log_position(sym, state, current_price, unrealized_pl, 'trailing_stop'):
-                    del self._position_state[sym]
-                else:
-                    logger.warning("Trailing stop close failed; preserving state for retry")
-                continue
-
-            # ── Time Stop (per-asset-class) ────────────────────────────
-            # Default to equity hours; override for crypto and commodity
-            if sym in ("BTCUSD", "ETHUSD", "BCHUSD", "LTCUSD", "UNIUSD", "LINKUSD"):
-                time_stop_hours = config.TIME_STOP_CRYPTO_HOURS
-            elif sym in ("GLD", "PDBC"):
-                time_stop_hours = config.TIME_STOP_COMMODITY_HOURS
-            else:
-                time_stop_hours = config.TIME_STOP_EQUITY_HOURS
-
+                bar_hours = 0.25
+                
+            time_stop_hours = time_stop_bars * bar_hours
+            if time_stop_hours < 0.25:
+                time_stop_hours = 0.25
+                
             hours_open = (time.time() - state['open_ts']) / 3600.0
             if hours_open > time_stop_hours and (unrealized_pl / (market_value + 1e-9)) < 0.005:
                 logger.info(
@@ -774,7 +1272,6 @@ class TradingEngine:
             )
 
             # --- OVERNIGHT TELEMETRY DUMP ---
-            import json
             telemetry_data = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "equity": equity,
@@ -833,6 +1330,25 @@ class TradingEngine:
                 getattr(self.ml_model, '_trained', False) if self.ml_model else False,
                 getattr(self.ml_model, '_training', False) if self.ml_model else False,
             )
+            # Log veto outcome stats summary
+            if self.ml_model is not None:
+                try:
+                    veto_stats = self.ml_model.get_veto_stats()
+                    for bucket_key, bucket_data in veto_stats.items():
+                        if bucket_data:
+                            summary_parts = []
+                            for key, rec in sorted(bucket_data.items()):
+                                summary_parts.append(
+                                    f"{key}: {rec['total']}t {rec['wins']}w {rec['losses']}l "
+                                    f"({rec['win_rate']*100:.0f}%)"
+                                )
+                            if summary_parts:
+                                logger.info(
+                                    "  ML Veto Stats [%s]: %s",
+                                    bucket_key, " | ".join(summary_parts),
+                                )
+                except Exception:
+                    pass
         except Exception as exc:
             logger.warning("Status log failed: %s", exc)
 

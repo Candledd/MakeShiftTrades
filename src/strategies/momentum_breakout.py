@@ -187,15 +187,21 @@ class MomentumBreakoutStrategy(BaseStrategy):
         ):
             return None
 
-        # Directional bias from last bar's close
-        last_bar_up = close.iloc[-1] > close.iloc[-2] if len(close) >= 2 else False
 
-        is_buy = current_close > current_upper
-        is_sell = current_close < current_lower
+        # Breakout must have happened on the previous bar
+        prev_breakout_buy = close.iloc[-2] > upper_channel.iloc[-2]
+        prev_breakout_sell = close.iloc[-2] < lower_channel.iloc[-2]
+
+        # Current bar must hold the breakout (not close back inside the channel range)
+        # Inside the range means dropping back below upper_channel (for long)
+        current_hold_buy = current_close >= current_upper
+        current_hold_sell = current_close <= current_lower
+
+        is_buy = prev_breakout_buy and current_hold_buy
+        is_sell = prev_breakout_sell and current_hold_sell
 
         if not (is_buy or is_sell):
             return None
-
         direction: str = "BUY" if is_buy else "SELL"
 
         # ── Volume expansion confirmation ──────────────────────────────
@@ -208,34 +214,9 @@ class MomentumBreakoutStrategy(BaseStrategy):
             return None
 
         # ── False breakout filter ──
-        # We require at least config.MB_FALSE_BREAKOUT_BARS to close outside the channel
-        # to filter out single-bar wicks/fakeouts.
-        if direction == "BUY":
-            bars_above = sum(
-                1 for i in range(-config.MB_FALSE_BREAKOUT_BARS, 0)
-                if close.iloc[i] > upper_channel.iloc[i]
-            )
-            if bars_above < config.MB_FALSE_BREAKOUT_BARS:
-                logger.debug(
-                    "%s %s: false breakout (only %d bars above channel, require %d+)",
-                    self.name, ticker, bars_above, config.MB_FALSE_BREAKOUT_BARS
-                )
-                return None
-        else:
-            bars_below = sum(
-                1 for i in range(-config.MB_FALSE_BREAKOUT_BARS, 0)
-                if close.iloc[i] < lower_channel.iloc[i]
-            )
-            if bars_below < config.MB_FALSE_BREAKOUT_BARS:
-                logger.debug(
-                    "%s %s: false breakout (only %d bars below channel, require %d+)",
-                    self.name, ticker, bars_below, config.MB_FALSE_BREAKOUT_BARS
-                )
-                return None
-
-        # ── 4-hour trend filter (mandatory for BTC) ────────────────────
-        htf_trend = self.get_htf_trend(ticker, htf_interval="4h", htf_period="1mo")
-        # Relaxed trend filter for higher trade frequency
+        # Replaced N-bar persistence with a 1-bar Hold rule:
+        # Breakout close -> next candle does not close back inside range.
+        # This is strictly enforced by the is_buy/is_sell conditions above.
 
         # ────────────────────────────────────────────────────────────────
         # Entry / Stop / Partial Take-Profit
@@ -353,4 +334,6 @@ class MomentumBreakoutStrategy(BaseStrategy):
             atr=current_atr,
             timestamp=datetime.now(timezone.utc),
             fat_tail_scalar=fat_tail_scalar,
+            time_stop_bars=10,
+            trailing_stop_logic="donchian",
         )

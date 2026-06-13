@@ -1105,6 +1105,110 @@ class AlpacaTrader:
             if rec.get("settled"):
                 continue
 
+            if rec.get("is_virtual_veto"):
+                # Handle virtual veto trade outcome check
+                ticker = rec.get("ticker")
+                symbol = rec.get("symbol")
+                entry_price = float(rec.get("entry", 0.0))
+                stop_loss = float(rec.get("stop_loss", 0.0))
+                take_profit = float(rec.get("take_profit", 0.0))
+                side = str(rec.get("side", "BUY")).upper()
+                submitted_ts = float(rec.get("submitted_ts", time.time()))
+                
+                # Fetch recent bars since submitted_ts
+                from charts.data import fetch_ohlcv
+                import pandas as pd
+                try:
+                    df = fetch_ohlcv(ticker, period="5d", interval="15m")
+                    start_dt = pd.to_datetime(submitted_ts, unit='s', utc=True)
+                    df_after = df[df.index >= start_dt]
+                    
+                    outcome = None
+                    exit_price = None
+                    exit_time = None
+                    for idx, row in df_after.iterrows():
+                        low = float(row["Low"])
+                        high = float(row["High"])
+                        
+                        # Check stop loss and take profit
+                        if side == "BUY":
+                            if low <= stop_loss and high >= take_profit:
+                                outcome = "stop_loss_hit"
+                                exit_price = stop_loss
+                                exit_time = idx.timestamp()
+                                break
+                            elif low <= stop_loss:
+                                outcome = "stop_loss_hit"
+                                exit_price = stop_loss
+                                exit_time = idx.timestamp()
+                                break
+                            elif high >= take_profit:
+                                outcome = "take_profit_hit"
+                                exit_price = take_profit
+                                exit_time = idx.timestamp()
+                                break
+                        else:  # SELL
+                            if high >= stop_loss and low <= take_profit:
+                                outcome = "stop_loss_hit"
+                                exit_price = stop_loss
+                                exit_time = idx.timestamp()
+                                break
+                            elif high >= stop_loss:
+                                outcome = "stop_loss_hit"
+                                exit_price = stop_loss
+                                exit_time = idx.timestamp()
+                                break
+                            elif low <= take_profit:
+                                outcome = "take_profit_hit"
+                                exit_price = take_profit
+                                exit_time = idx.timestamp()
+                                break
+                    
+                    if outcome:
+                        worked = (outcome == "take_profit_hit")
+                        reason = outcome
+                        
+                        pnl_pct = 0.0
+                        if exit_price and entry_price > 0:
+                            signed = (exit_price - entry_price) / entry_price
+                            if side == "SELL":
+                                signed *= -1.0
+                            pnl_pct = float(signed * 100.0)
+                        
+                        feedback = {
+                            "order_id": order_id,
+                            "ticker": ticker,
+                            "symbol": symbol,
+                            "side": side,
+                            "worked": bool(worked),
+                            "result_reason": reason,
+                            "entry": entry_price,
+                            "exit_price": exit_price,
+                            "pnl_pct": pnl_pct,
+                            "confidence": float(rec.get("confidence", 0.0) or 0.0),
+                            "submitted_ts": submitted_ts,
+                            "closed_ts": exit_time or time.time(),
+                            "feature_row": (rec.get("metadata") or {}).get("feature_row"),
+                            "signal_reason": (rec.get("metadata") or {}).get("signal_reason"),
+                        }
+                        
+                        self._state.setdefault("ml_feedback_queue", []).append(feedback)
+                        rec["settled"] = True
+                        rec["result_reason"] = reason
+                        rec["worked"] = bool(worked)
+                        rec["closed_ts"] = exit_time or time.time()
+                        
+                        processed += 1
+                        queued += 1
+                        
+                        logger.info(
+                            "[VIRTUAL OUTCOME] Virtual vetoed trade for %s completed: %s | PnL: %.2f%%",
+                            ticker, reason, pnl_pct
+                        )
+                except Exception as exc:
+                    logger.warning("Failed to simulate virtual trade outcome for %s: %s", ticker, exc)
+                continue
+
             try:
                 order = self._client.get_order_by_id(order_id)
             except Exception as exc:

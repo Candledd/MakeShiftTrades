@@ -12,14 +12,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
+import config
 from src.strategies import BaseStrategy, StrategySignal
 
 logger = logging.getLogger(__name__)
-
-import config
 
 
 class TrendPullbackStrategy(BaseStrategy):
@@ -47,11 +45,11 @@ class TrendPullbackStrategy(BaseStrategy):
         direction: str,
         atr: float,
     ) -> float:
+        """Compute stop loss price for long trades (BUY direction only)."""
+        if direction != "BUY":
+            raise ValueError(f"TrendPullbackStrategy only supports BUY direction, got {direction}")
         stop_distance = config.TP_STOP_MULT * atr
-        if direction == "BUY":
-            return entry - stop_distance
-        else:
-            return entry + stop_distance
+        return entry - stop_distance
 
     # ------------------------------------------------------------------
     # Main analysis
@@ -73,18 +71,17 @@ class TrendPullbackStrategy(BaseStrategy):
         ema50 = close.ewm(span=50, adjust=False).mean()
         current_ema50 = float(ema50.iloc[-1])
         if float(close.iloc[-1]) < current_ema50:
-             return None
+            return None
 
-        # -- HTF trend MUST be bullish -----------------------------------
-        # Relaxing this condition for frequency
+        # -- HTF trend routing -------------------------------------------
         htf_trend = self.get_htf_trend(ticker)
-        # We ignore HTF trend if it is too restrictive
-        # if htf_trend == "bearish": # Only skip if strongly bearish
-        #     logger.debug(
-        #         "%s: %s HTF trend is %s (skipping)",
-        #         self.name, ticker, htf_trend,
-        #     )
-        #     return None
+        if htf_trend is None:
+            # Map None (unable to determine HTF trend) to neutral intentionally
+            htf_trend = "neutral"
+
+        if htf_trend == "bearish":
+            logger.debug("%s: %s HTF trend is bearish (skipping)", self.name, ticker)
+            return None
 
         # -- Bollinger Bands ---------------------------------------------
         sma20 = close.rolling(config.TP_BB_PERIOD).mean()
@@ -101,7 +98,7 @@ class TrendPullbackStrategy(BaseStrategy):
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
         # -- VWAP --------------------------------------------------------
-        vwap = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
+        vwap = (close * volume).cumsum() / volume.cumsum()
 
         # -- Current values (last bar) -----------------------------------
         current_close = float(close.iloc[-1])
@@ -131,10 +128,15 @@ class TrendPullbackStrategy(BaseStrategy):
         # a daily uptrend.
         # ----------------------------------------------------------------
 
-        at_lower_band = current_close <= current_lower * config.TP_PULLBACK_BUFFER
+        if htf_trend == "neutral":
+            at_lower_band = current_close <= current_lower * 1.002
+            volume_confirm = vol_ratio > 1.5
+        else:
+            at_lower_band = current_close <= current_lower * config.TP_PULLBACK_BUFFER
+            volume_confirm = vol_ratio > 1.0
+
         rsi_weak_not_collapsing = 15.0 <= current_rsi <= 65.0
         reclaiming_band = current_close > current_lower
-        volume_confirm = vol_ratio > 0.5
         
         if not (at_lower_band and rsi_weak_not_collapsing and reclaiming_band and volume_confirm):
             return None
@@ -156,7 +158,7 @@ class TrendPullbackStrategy(BaseStrategy):
         # R/R gate: require dynamic minimum R/R to survive slippage
         tp_distance = take_profit - entry
         sl_distance = entry - stop_loss
-        if tp_distance < sl_distance * getattr(config, 'TP_MIN_RR', 1.2):
+        if tp_distance < sl_distance * config.TP_MIN_RR:
             logger.debug(
                 "%s %s: poor R/R (entry=%.2f, SL=%.2f, TP=%.2f)",
                 self.name, ticker, entry, stop_loss, take_profit,
@@ -188,6 +190,12 @@ class TrendPullbackStrategy(BaseStrategy):
         if current_close < current_vwap * 0.997:
             confidence += 10.0
 
+        # HTF Trend confidence adjustments
+        if htf_trend == "bullish":
+            confidence += 10.0
+        elif htf_trend == "neutral":
+            confidence *= 0.5
+
         confidence = min(90.0, confidence)
 
         # -- Reason -----------------------------------------------------
@@ -213,4 +221,6 @@ class TrendPullbackStrategy(BaseStrategy):
             atr=round(atr_val, 4),
             timestamp=datetime.now(timezone.utc),
             order_type=order_type,
+            time_stop_bars=10,
+            trailing_stop_logic="sma20_or_ema",
         )

@@ -11,6 +11,8 @@ import threading
 import time
 import traceback
 import collections
+import math
+
 import config
 
 import pandas as pd
@@ -73,7 +75,9 @@ _werkzeug_log.setLevel(_logging.ERROR)
 # All /api/* routes require a valid API key passed via the X-API-Key header.
 # Set API_KEY in your .env file or environment. If unset, a mock key is used
 # for local development; change this before deploying to production.
-API_KEY = os.getenv("API_KEY", "dev-key-123")
+API_KEY = os.getenv("API_KEY")
+if not API_KEY:
+    raise ValueError("API_KEY environment variable is required")
 
 @app.before_request
 def _require_api_key():
@@ -611,6 +615,26 @@ def api_paper_status():
     return jsonify(result)
 
 
+
+# ── Order validation helper ─────────────────────────────────────────────────────
+
+def validate_order(
+    entry: float,
+    stop_loss: float,
+    take_profit: float,
+) -> None:
+    """Validate numeric order fields: must be finite, non-NaN, and > 0.
+
+    Raises ValueError with a descriptive message if any field is invalid.
+    """
+    for name, val in [("entry", entry), ("stop_loss", stop_loss), ("take_profit", take_profit)]:
+        if math.isnan(val):
+            raise ValueError(f"{name} is NaN")
+        if math.isinf(val):
+            raise ValueError(f"{name} is infinite")
+        if val <= 0:
+            raise ValueError(f"{name} must be > 0, got {val}")
+
 @app.route("/api/paper/execute", methods=["POST"])
 def api_paper_execute():
     """Execute a paper bracket order for a given ticker.
@@ -653,6 +677,12 @@ def api_paper_execute():
         take_profit = float(data["take_profit"])
     except (KeyError, TypeError, ValueError) as exc:
         return jsonify({"ok": False, "error": f"Missing/invalid numeric field: {exc}"}), 400
+
+    # Validate numeric fields: finite, non-NaN, > 0
+    try:
+        validate_order(entry, stop_loss, take_profit)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
 
     if not ticker or not side:
         return jsonify({"ok": False, "error": "Fields 'ticker' and 'side' are required."}), 400
@@ -798,7 +828,7 @@ def api_bot_status():
         "cycle_count": _bot_engine.cycle_count if _bot_engine else 0,
         "signals_today": _bot_engine.signals_today if _bot_engine else 0,
         "orders_today": _bot_engine.orders_today if _bot_engine else 0,
-        "ai_regime": _bot_engine.ai_tuner.current_regimes if (_bot_engine and hasattr(_bot_engine, "ai_tuner")) else {"Equity": "Unknown", "Crypto": "Unknown", "Commodity": "Unknown"},
+        "ai_regime": _bot_engine.ai_tuner.current_regimes if (_bot_engine and hasattr(_bot_engine, "ai_tuner")) else {"Equity": "Unknown", "Crypto": "Unknown", "Gold": "Unknown", "Broad Commodity": "Unknown"},
         "config": {
             "dry_run": config.DRY_RUN,
             "max_risk_pct": config.MAX_RISK_PCT,
@@ -862,11 +892,17 @@ def api_bot_configure():
         if "dry_run" in data:
             config.DRY_RUN = bool(data["dry_run"])
         if "max_risk_pct" in data:
-            config.MAX_RISK_PCT = float(data["max_risk_pct"])
+            val = float(data["max_risk_pct"])
+            if not (0.001 <= val <= 0.1):
+                return jsonify({"ok": False, "error": "max_risk_pct must be between 0.001 and 0.1"}), 400
+            config.MAX_RISK_PCT = val
         if "max_positions" in data:
             config.MAX_POSITIONS = int(data["max_positions"])
         if "scan_interval" in data:
-            config.SCAN_INTERVAL = float(data["scan_interval"])
+            val = float(data["scan_interval"])
+            if not (60 <= val <= 3600):
+                return jsonify({"ok": False, "error": "scan_interval must be between 60 and 3600 seconds"}), 400
+            config.SCAN_INTERVAL = val
             
         # Dynamically sync config changes to the active engine instances if running
         if _bot_engine:

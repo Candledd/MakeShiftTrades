@@ -13,31 +13,7 @@ from src.strategies.momentum_breakout import MomentumBreakoutStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.trend_pullback import TrendPullbackStrategy
 from charts.data import fetch_ohlcv
-
-def simulate_trade(df, entry_idx, signal):
-    """
-    Given a dataframe, the index where the signal fired, and the signal itself,
-    simulate future price action to see if Take Profit or Stop Loss was hit first.
-    Returns (result, holding_bars). result is 'TP', 'SL', or 'OPEN'.
-    """
-    future_df = df.iloc[entry_idx + 1:]
-    
-    for i, (_, row) in enumerate(future_df.iterrows()):
-        high = row['High']
-        low = row['Low']
-        
-        if signal.direction == 'BUY':
-            if low <= signal.stop_loss:
-                return 'SL', i + 1
-            if high >= signal.take_profit:
-                return 'TP', i + 1
-        elif signal.direction == 'SELL':
-            if high >= signal.stop_loss:
-                return 'SL', i + 1
-            if low <= signal.take_profit:
-                return 'TP', i + 1
-                
-    return 'OPEN', len(future_df)
+from src.backtester import simulate_trade
 
 def run_backtest():
     print("=" * 60)
@@ -53,10 +29,6 @@ def run_backtest():
         ("GLD", "4h", TrendFollowingStrategy()),
         ("PDBC", "4h", TrendFollowingStrategy())
     ]
-    
-    # We need enough history for indicators (e.g. 200 EMA needs 200 bars).
-    # For 15m, 1 week is ~130 bars. We need at least 3-4 weeks to get 200 bars.
-    # We'll fetch 1mo of data, but only test the last 7 calendar days.
     
     for ticker, tf, strategy in strategies_to_test:
         print(f"\nTesting {strategy.name} on {ticker} ({tf})...")
@@ -90,21 +62,24 @@ def run_backtest():
                 signal = strategy.analyze(window_df, ticker)
                 
                 if signal:
+                    outcome, exit_price, bars, pnl_per_share = simulate_trade(df, i, signal)
+                    if outcome == 'NO_FILL':
+                        print(f"  [{df.index[i]}] SIGNAL: {signal.direction} | Outcome: NO_FILL")
+                        continue
+                        
                     signals_generated += 1
-                    outcome, bars = simulate_trade(df, i, signal)
-                    
-                    if outcome == 'TP':
+                    if outcome in ('TP', 'TRAIL_SL') or pnl_per_share > 0:
                         wins += 1
-                    elif outcome == 'SL':
+                    elif outcome == 'SL' or pnl_per_share < 0:
                         losses += 1
                     else:
                         open_trades += 1
                         
-                    print(f"  [{df.index[i]}] SIGNAL: {signal.direction} | R/R: {abs(signal.take_profit-signal.entry)/abs(signal.stop_loss-signal.entry):.2f} | Outcome: {outcome} ({bars} bars)")
+                    print(f"  [{df.index[i]}] SIGNAL: {signal.direction} | R/R: {abs(signal.take_profit-signal.entry)/abs(signal.stop_loss-signal.entry):.2f} | Outcome: {outcome} ({bars} bars) | PnL/share: {pnl_per_share:+.4f}")
             
             print(f"  Summary: {signals_generated} signals | {wins} Wins, {losses} Losses, {open_trades} Open")
-            if signals_generated > 0:
-                win_rate = (wins / (wins + losses)) * 100 if (wins + losses) > 0 else 0
+            if (wins + losses) > 0:
+                win_rate = (wins / (wins + losses)) * 100
                 print(f"  Win Rate (Closed Trades): {win_rate:.1f}%")
             
         except Exception as e:

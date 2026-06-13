@@ -374,12 +374,20 @@ def make_labels(df: pd.DataFrame, fwd: int = FWD_BARS) -> pd.Series:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SMCMLModel:
-    """Binary Veto Filter — Gradient-Boosted classifier for setup quality.
+    """Binary Veto Filter → Dynamic Sizing Factor.
 
-    The model predicts P(up) over the next ``FWD_BARS`` bars.  The SMC
-    strategy can then use this probability to confirm or veto a setup:
-      - BUY  signal confirmed when P(up) >= ``SETUP_VETO_THRESHOLD``
-      - SELL signal confirmed when P(up) <= 1 - ``SETUP_VETO_THRESHOLD``
+    The model predicts P(up) over the next ``FWD_BARS`` bars.  Instead of a
+    hard binary veto the model now returns a **continuous sizing multiplier**
+    (0.0–1.5) that the engine uses to scale position size:
+
+      * Strong disagreement → near-zero multiplier → hard veto
+      * Mild disagreement   → 0.3–0.7 multiplier   → size reduction
+      * Neutral             → ~1.0 multiplier      → no change
+      * Agreement           → 1.3–1.5 multiplier   → optional size boost
+
+    The legacy ``veto`` field is kept for backward compatibility with the
+    ``server.py`` UI endpoint; it is set to ``True`` only when the model
+    probability strongly disagrees with the signal direction.
     """
 
     def __init__(self) -> None:
@@ -394,6 +402,13 @@ class SMCMLModel:
         self._feedback_since_retrain = 0
         self._feat_cache: dict = {}
         self._cache_lock = threading.Lock()
+        # Veto outcome tracking — stats grouped by strategy / regime / ticker
+        self._veto_outcomes: dict[str, dict] = {
+            "by_strategy": {},
+            "by_regime":   {},
+            "by_ticker":   {},
+        }
+        self._veto_outcomes_lock = threading.Lock()
 
     def _needs_training(self, max_age_hours: float = 24.0) -> bool:
         if not self._trained:
@@ -676,34 +691,50 @@ class SMCMLModel:
     # ------------------------------------------------------------------ #
 
     def evaluate_signal(self, df: pd.DataFrame, signal_direction: str) -> dict:
-        """Evaluate an SMC signal through the Veto Filter.
+        """Evaluate an SMC signal through the ML Dynamic Sizing Filter.
+
+        Instead of a binary veto, the model returns a continuous
+        ``sizing_multiplier`` (0.0–1.5) that the engine uses to scale
+        position size:
+
+          * 1.0       → neutral / no adjustment
+          * 0.0–0.3   → strong disagreement → engine hard-vetoes
+          * 0.3–0.7   → mild disagreement  → engine reduces size
+          * 0.7–1.3   → weak/no opinion    → neutral
+          * 1.3–1.5   → agreement          → engine optionally boosts size
+
+        The legacy ``veto`` field is retained for backward compatibility
+        (e.g. ``server.py``) and is set to ``True`` only when the
+        ``sizing_multiplier`` is below the strong-veto threshold (0.3).
 
         Parameters
         ----------
         df : pd.DataFrame
             OHLCV data for feature extraction.
         signal_direction : str
-            ``\"BUY\"`` or ``\"SELL\"`` from the SMC strategy.
+            ``\"BUY\"`` or ``\"SELL\"`` from the strategy.
 
         Returns
         -------
         dict
-            ``veto``:      True if the ML says skip this trade
-            ``confidence``: 0–100 confidence in the signal direction
-            ``prob_up``:    raw P(price up) output of the model
-            ``details``:    full probabilities dict for frontend
+            ``sizing_multiplier``: continuous 0.0–1.5 factor
+            ``veto``:              legacy boolean (True if sizing_multiplier < 0.3)
+            ``confidence``:        0–100 confidence in the signal direction
+            ``prob_up``:           raw P(price up) output of the model
+            ``details``:           full probabilities dict for frontend
         """
         self.ensure_trained(async_mode=True)
 
         if not self._trained:
-            # No model → no veto (let the strategy run)
+            # No model → neutral sizing (let the strategy run)
             return {
-                "veto": False,
-                "confidence": 50.0,
-                "prob_up": 0.5,
-                "details": {"BUY": 50.0, "HOLD": 0.0, "SELL": 50.0},
-                "trained": False,
-                "training": self._is_training(),
+                "veto":              False,
+                "sizing_multiplier": 1.0,
+                "confidence":        50.0,
+                "prob_up":           0.5,
+                "details":           {"BUY": 50.0, "HOLD": 0.0, "SELL": 50.0},
+                "trained":           False,
+                "training":          self._is_training(),
             }
 
         # Feature caching (same as before)
@@ -748,33 +779,113 @@ class SMCMLModel:
                 "SELL": round(prob_down * 100, 1),
             }
 
-            # Veto decision
+            # ── Continuous sizing factor (0.0–1.5) ─────────────────────
+            # For a BUY signal:  prob_up / 0.5 → 1.0 at p=0.5
+            # For a SELL signal: prob_down / 0.5 → 1.0 at p=0.5
             if signal_direction == "BUY":
                 confidence = prob_up * 100
-                veto = prob_up < SETUP_VETO_THRESHOLD
+                raw_multiplier = prob_up / 0.5
             else:  # SELL
                 confidence = prob_down * 100
-                veto = prob_up > (1.0 - SETUP_VETO_THRESHOLD)
+                raw_multiplier = prob_down / 0.5
+
+            sizing_multiplier = max(0.0, min(1.5, raw_multiplier))
+            # Legacy veto: True only when the model strongly disagrees
+            veto = sizing_multiplier < 0.3
 
             return {
-                "veto":        veto,
-                "confidence":  round(confidence, 1),
-                "prob_up":     round(prob_up, 4),
-                "details":     details,
-                "trained":     True,
-                "training":    self._is_training(),
+                "veto":              veto,
+                "sizing_multiplier": round(sizing_multiplier, 2),
+                "confidence":        round(confidence, 1),
+                "prob_up":           round(prob_up, 4),
+                "details":           details,
+                "trained":           True,
+                "training":          self._is_training(),
             }
 
         except Exception as exc:
             logger.exception("ML evaluate_signal failed: %s", exc)
             return {
-                "veto":       False,  # no veto on error
-                "confidence": 50.0,
-                "prob_up":    0.5,
-                "details":    {"BUY": 50.0, "HOLD": 0.0, "SELL": 50.0},
-                "trained":    True,
-                "training":   self._is_training(),
+                "veto":              False,
+                "sizing_multiplier": 1.0,
+                "confidence":        50.0,
+                "prob_up":           0.5,
+                "details":           {"BUY": 50.0, "HOLD": 0.0, "SELL": 50.0},
+                "trained":           True,
+                "training":          self._is_training(),
             }
+
+    # ------------------------------------------------------------------ #
+    # Veto outcome tracking                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _track_veto_outcome(self, strategy: str, regime: str,
+                             ticker: str, sizing_multiplier: float,
+                             outcome: str) -> None:
+        """Record a resolved veto/reduction/boost outcome into the per-group
+        stats dictionaries so we can audit the ML's value by strategy,
+        regime, and ticker over time.
+
+        Parameters
+        ----------
+        strategy : str
+            e.g. ``"mean_reversion"``, ``"trend_pullback"``
+        regime : str
+            e.g. ``"Bullish Calm"``, ``"Bearish Volatile"``
+        ticker : str
+            e.g. ``"SPY"``, ``"BTC-USD"``
+        sizing_multiplier : float
+            The multiplier that was applied (0.0–1.5).
+        outcome : str
+            ``"take_profit_hit"``, ``"stop_loss_hit"``, or ``"open"``
+        """
+        outcome_bin = "win" if outcome == "take_profit_hit" else "loss"
+        with self._veto_outcomes_lock:
+            for bucket_key, bucket_val in [
+                ("by_strategy", strategy),
+                ("by_regime", regime),
+                ("by_ticker", ticker),
+            ]:
+                group = self._veto_outcomes[bucket_key]
+                if bucket_val not in group:
+                    group[bucket_val] = {
+                        "total": 0, "wins": 0, "losses": 0,
+                        "sum_multiplier": 0.0,
+                    }
+                rec = group[bucket_val]
+                rec["total"] += 1
+                rec["sum_multiplier"] += sizing_multiplier
+                if outcome_bin == "win":
+                    rec["wins"] += 1
+                else:
+                    rec["losses"] += 1
+
+    def get_veto_stats(self) -> dict:
+        """Return aggregated veto outcome stats grouped by strategy, regime,
+        and ticker.
+
+        Returns
+        -------
+        dict
+            ``{"by_strategy": {strategy: {...}}, "by_regime": {...},
+            "by_ticker": {...}}``
+            Each value dict contains ``total``, ``wins``, ``losses``,
+            ``win_rate``, ``avg_multiplier``.
+        """
+        with self._veto_outcomes_lock:
+            result: dict[str, dict] = {}
+            for bucket_key, bucket_data in self._veto_outcomes.items():
+                result[bucket_key] = {}
+                for key, rec in bucket_data.items():
+                    rec_out = dict(rec)
+                    rec_out["win_rate"] = round(
+                        rec["wins"] / max(rec["total"], 1), 4
+                    )
+                    rec_out["avg_multiplier"] = round(
+                        rec["sum_multiplier"] / max(rec["total"], 1), 2
+                    )
+                    result[bucket_key][key] = rec_out
+            return result
 
     def predict(self, df: pd.DataFrame) -> dict:
         """Legacy interface — returns BUY/HOLD/SELL for the last bar.

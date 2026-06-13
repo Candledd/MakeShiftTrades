@@ -29,14 +29,11 @@ class TrendFollowingStrategy(BaseStrategy):
 
     # ── Ticker-specific thresholds ──────────────────────────────────────
     # GLD: tighter stops, trend-confirmation required
-    GLD_STOP_MULT = 1.8       # ATR multiplier for stop loss
     GLD_TP_MULT = 3.0         # ATR multiplier for initial bracket target
     GLD_ADX_MIN = 25.0        # minimum ADX strength
 
     # PDBC: wider stops for oil volatility, stricter ADX to avoid chop
-    PDBC_STOP_MULT = 2.5       # ATR multiplier for stop loss (wider)
     PDBC_TP_MULT = 4.0         # ATR multiplier for initial bracket target
-    PDBC_ADX_MIN = 25.0        # higher ADX = only real trends
 
     def __init__(self) -> None:
         super().__init__(
@@ -71,7 +68,8 @@ class TrendFollowingStrategy(BaseStrategy):
         high = df["High"]
         low = df["Low"]
 
-        ema20 = close.ewm(span=config.TF_EMA_FAST, adjust=False).mean()
+        fast_ema_span = config.GLD_EMA_FAST if ticker == "GLD" else config.PDBC_EMA_FAST
+        ema20 = close.ewm(span=fast_ema_span, adjust=False).mean()
         ema50 = close.ewm(span=config.TF_EMA_SLOW, adjust=False).mean()
 
         # MACD
@@ -231,7 +229,8 @@ class TrendFollowingStrategy(BaseStrategy):
 
         # ── GLD: HTF trend is REQUIRED (not just a bonus) ──────────────
         # GLD moves are driven by macro direction; trade with the daily trend.
-        if htf_trend is None:
+        # Controlled by config.GLD_TREND_FILTER.
+        if config.GLD_TREND_FILTER == "HTF" and htf_trend is None:
             logger.debug("%s: GLD — no clear HTF trend, skipping", ticker)
             return None
 
@@ -287,16 +286,19 @@ class TrendFollowingStrategy(BaseStrategy):
         breakout_trigger = False
 
         # A) Pullback check: any of last 3 bars pulled back to EMA20
-        if gld_direction == "BUY":
-            for i in range(-3, 0):
-                if low.iloc[i] <= ema20.iloc[i] and close.iloc[i] > ema20.iloc[i]:
-                    pullback_trigger = True
-                    break
-        else:  # SELL
-            for i in range(-3, 0):
-                if high.iloc[i] >= ema20.iloc[i] and close.iloc[i] < ema20.iloc[i]:
-                    pullback_trigger = True
-                    break
+        # Controlled by config.GLD_PULLBACK_TRIGGER.
+        pullback_enabled = config.GLD_PULLBACK_TRIGGER == "enabled"
+        if pullback_enabled:
+            if gld_direction == "BUY":
+                for i in range(-3, 0):
+                    if low.iloc[i] <= ema20.iloc[i] and close.iloc[i] > ema20.iloc[i]:
+                        pullback_trigger = True
+                        break
+            else:  # SELL
+                for i in range(-3, 0):
+                    if high.iloc[i] >= ema20.iloc[i] and close.iloc[i] < ema20.iloc[i]:
+                        pullback_trigger = True
+                        break
 
         # B) Fresh crossover in last 3 bars + histogram accelerating
         if gld_direction == "BUY" and fresh_cross_up:
@@ -319,7 +321,7 @@ class TrendFollowingStrategy(BaseStrategy):
             reason_parts.append("Pullback to EMA20")
 
         # ── Stop loss & initial target ─────────────────────────────
-        stop_mult = self.GLD_STOP_MULT
+        stop_mult = config.GLD_STOP_MULT
         tp_mult = self.GLD_TP_MULT
 
         if gld_direction == "BUY":
@@ -415,6 +417,8 @@ class TrendFollowingStrategy(BaseStrategy):
             atr=atr_val,
             timestamp=datetime.now(timezone.utc),
             order_type="MARKET",
+            time_stop_bars=15,
+            trailing_stop_logic="atr",
         )
 
     # ──────────────────────────────────────────────────────────────────────
@@ -473,10 +477,10 @@ class TrendFollowingStrategy(BaseStrategy):
             return None
 
         # ── Stricter ADX for PDBC — avoid weak trends ───────────────────
-        if current_adx < self.PDBC_ADX_MIN:
+        if current_adx < config.PDBC_ADX_MIN:
             logger.debug(
                 "%s: PDBC — ADX too weak (%.1f < %.1f), skipping",
-                ticker, current_adx, self.PDBC_ADX_MIN,
+                ticker, current_adx, config.PDBC_ADX_MIN,
             )
             return None
         reason_parts.append(f"ADX {current_adx:.0f}")
@@ -514,16 +518,17 @@ class TrendFollowingStrategy(BaseStrategy):
         avg_range_20 = float(recent_range.rolling(window=20).mean().iloc[-1])
         atr_20_avg = float(indicators["atr_series"].rolling(window=20).mean().iloc[-1])
 
-        # Only enter if range is not compressed (at least 70% of typical)
+        # Only enter if range is not compressed (at least config.PDBC_RANGE_EXPANSION_THRESHOLD of typical)
+        range_threshold = config.PDBC_RANGE_EXPANSION_THRESHOLD
         range_expanding = False
-        if atr_20_avg > 0 and current_range >= avg_range_20 * 0.7:
+        if atr_20_avg > 0 and current_range >= avg_range_20 * range_threshold:
             range_expanding = True
             reason_parts.append("Range expanding")
 
         if not range_expanding:
             logger.debug(
-                "%s: PDBC — range too narrow (%.2f < %.2f * 0.7), skipping",
-                ticker, current_range, avg_range_20,
+                "%s: PDBC — range too narrow (%.2f < %.2f * %.2f), skipping",
+                ticker, current_range, avg_range_20, range_threshold,
             )
             return None
 
@@ -539,7 +544,7 @@ class TrendFollowingStrategy(BaseStrategy):
                 return None
 
         # ── Stop loss & initial target (wider for PDBC) ─────────────────
-        stop_mult = self.PDBC_STOP_MULT
+        stop_mult = config.PDBC_STOP_MULT
         tp_mult = self.PDBC_TP_MULT
 
         if direction == "BUY":
@@ -637,4 +642,6 @@ class TrendFollowingStrategy(BaseStrategy):
             atr=atr_val,
             timestamp=datetime.now(timezone.utc),
             order_type="MARKET",
+            time_stop_bars=9,
+            trailing_stop_logic="tighter_atr",
         )
