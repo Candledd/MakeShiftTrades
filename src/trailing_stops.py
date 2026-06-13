@@ -17,9 +17,11 @@ Strategy → trailing logic mapping (config-overridable):
 
 from __future__ import annotations
 
+import time
 import pandas as pd
 import numpy as np
 import config
+from src.macro_filter import MacroFilter
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
@@ -217,9 +219,21 @@ def calculate_trailing_stop(
             # PDBC event-risk tightening (codex.md item 14): tighten the
             # trailing distance during macro events so the position is
             # less exposed to event-driven gap risk.
+            # Only applied when there is an active event affecting the ticker.
             if "PDBC" in ticker.upper():
-                event_factor = getattr(config, "PDBC_EVENT_TIGHTEN_FACTOR", 0.5)
-                mult = mult * event_factor
+                active_events = MacroFilter.check_event(time.time())
+                # Normalize ticker for comparison (remove "-USD" suffix)
+                normal_ticker = ticker.upper().replace("-USD", "")
+                has_active_event = False
+                for event in active_events:
+                    affected = event.get("affected_assets", [])
+                    normalized_affected = [a.upper().replace("-USD", "") for a in affected]
+                    if "ALL" in normalized_affected or normal_ticker in normalized_affected:
+                        has_active_event = True
+                        break
+                if has_active_event:
+                    event_factor = getattr(config, "PDBC_EVENT_TIGHTEN_FACTOR", 0.5)
+                    mult = mult * event_factor
 
             trail_dist = atr_val * mult
             if is_long:

@@ -257,13 +257,16 @@ class RiskManager:
     # ── Position Sizing ────────────────────────────────────────────────
 
     def calculate_position_size(
-        self, signal: StrategySignal, account_equity: float, signal_regime: Optional[str] = None
+        self, signal: StrategySignal, account_equity: float, signal_regime: Optional[str] = None,
+        ml_multiplier: float = 1.0, ev_r: float = 0.0, sample_size: int = 0,
     ) -> float:
         """Adaptive Stop-distance-based position sizing with tiered risk,
-        volatility shock protection, and gap/slippage buffer.
+        volatility shock protection, gap/slippage buffer, ML multiplier,
+        and expectancy-based soft penalties.
 
         Returns the notional dollar amount to invest, scaled dynamically by
-        asset-class tier, signal confidence, drawdown, and volatility.
+        asset-class tier, signal confidence, drawdown, volatility, ML, and
+        expectancy ratio.
         """
         # 1. Update Peak Equity (High-Water Mark)
         if account_equity > self.peak_equity:
@@ -324,17 +327,40 @@ class RiskManager:
         position_size_shares = risk_dollars / stop_distance
         notional = position_size_shares * signal.entry
 
-        # 9. Apply Absolute Caps
+        # 9. ML Multiplier (applied before absolute caps so portfolio heat checks
+        #    see the boosted notional — must precede max_notional hard cap)
+        notional *= ml_multiplier
+        notional = max(1.0, round(notional, 2))
+
+        # 10. Expectancy-Based Soft Penalty
+        #     ev_r / sample_size are already fetched once in approve().
+        #     Apply a tapered notional reduction when sample coverage exists but
+        #     is insufficient for a hard disable.
+        expectancy_multiplier = 1.0
+        if ev_r < _cfg.MIN_EXPECTANCY_R:
+            band_1 = _cfg.EXPECTANCY_SOFT_BAND_1_MIN
+            band_2 = _cfg.EXPECTANCY_SOFT_BAND_2_MIN
+            hard_disable = _cfg.EXPECTANCY_HARD_DISABLE_SAMPLES
+            if band_1 <= sample_size < band_2:
+                expectancy_multiplier = _cfg.EXPECTANCY_SOFT_BAND_1_MULT
+            elif band_2 <= sample_size < hard_disable:
+                expectancy_multiplier = _cfg.EXPECTANCY_SOFT_BAND_2_MULT
+
+        notional *= expectancy_multiplier
+        notional = max(1.0, round(notional, 2))
+
+        # 11. Gap / Slippage Buffer
+        notional = self._apply_gap_buffer(notional)
+
+        # 12. Apply Absolute Caps (max_notional must be the very last sizing step)
         notional = min(notional, account_equity * self.max_position_pct)
         notional = min(notional, self.max_notional)
         notional = max(1.0, round(notional, 2))
 
-        # 10. Gap / Slippage Buffer
-        notional = self._apply_gap_buffer(notional)
-
         self.logger.info(
             "Adaptive Sizing | Tier: %s @ %.4f%% | Conf: %.1f%% | "
-            "Shock: %.2fx | DD: %.2fx | Risk: %.3f%% ($%.2f) | Notional: $%.2f",
+            "Shock: %.2fx | DD: %.2fx | Risk: %.3f%% ($%.2f) | Notional: $%.2f | "
+            "ML: %.2fx | Exp: %.2fx (ev_r=%.3f, n=%d)",
             tier_name,
             tier_risk_pct * 100,
             confidence_clamped,
@@ -343,6 +369,10 @@ class RiskManager:
             adaptive_risk_pct * 100,
             risk_dollars,
             notional,
+            ml_multiplier,
+            expectancy_multiplier,
+            ev_r,
+            sample_size,
         )
         return notional
 
@@ -556,7 +586,8 @@ class RiskManager:
 
     def validate_signal(
         self, signal: StrategySignal, signal_regime: str | None = None,
-        df: pd.DataFrame = None, quote: dict = None, notional: float = 0.0
+        df: pd.DataFrame = None, quote: dict = None, notional: float = 0.0,
+        ev_r: float = 0.0, sample_size: int = 0,
     ) -> tuple[bool, str]:
         """Validate the signal's price, stop, R/R, direction consistency,
         ATR-based spread/liquidity cap, and strategy expectancy.
@@ -632,16 +663,10 @@ class RiskManager:
             return (False, spread_reason)
 
         # 7. Strategy expectancy gate — reject trades with negative expected value
-        #    Two-tier granular check: first with symbol + regime, fall back to
-        #    broader strategy+direction when the sample is too small.
-        alpaca_ticker = self._resolve_ticker(signal.ticker)
-        ev_r, sample_size = get_strategy_expectancy(
-            signal.strategy_name, signal.direction,
-            symbol=alpaca_ticker, regime=signal_regime,
-        )
-        if sample_size < _cfg.MIN_EXPECTANCY_SAMPLES:
-            ev_r, sample_size = get_strategy_expectancy(signal.strategy_name, signal.direction)
-        if sample_size >= _cfg.MIN_EXPECTANCY_SAMPLES and ev_r < _cfg.MIN_EXPECTANCY_R:
+        #    ev_r / sample_size are already fetched once in approve().
+        #    Hard-disable only when we have enough samples and the expectancy
+        #    ratio is below the minimum threshold.
+        if sample_size >= _cfg.EXPECTANCY_HARD_DISABLE_SAMPLES and ev_r < _cfg.MIN_EXPECTANCY_R:
             return (
                 False,
                 f"Expectancy gate: ev_r={ev_r:.3f} (sample={sample_size}) "
@@ -662,11 +687,15 @@ class RiskManager:
         signal_regime: Optional[str] = None,
         df: pd.DataFrame = None,
         quote: dict = None,
+        ml_multiplier: float = 1.0,
     ) -> tuple[bool, float, str]:
         """Run the full risk pipeline: validate → correlation → size.
 
         ``signal_regime`` is forwarded to ``validate_signal`` for granular
         expectancy filtering.
+
+        ``ml_multiplier`` is forwarded to ``calculate_position_size`` so that
+        ML boost/reduce is baked into the notional before portfolio heat checks.
 
         Returns ``(approved, notional, reason)``.
         """
@@ -694,8 +723,21 @@ class RiskManager:
             )
             return (False, 0.0, f"Weekly P&L kill switch: ${weekly_pnl:.2f} exceeds limit")
 
-        # 1. Position sizing (calculated early for validation and portfolio heat)
-        notional = self.calculate_position_size(signal, account_equity, signal_regime=signal_regime)
+        # 0b. Two-tier expectancy lookup (used by sizing AND validation)
+        alpaca_ticker = self._resolve_ticker(signal.ticker)
+        ev_r, sample_size = get_strategy_expectancy(
+            signal.strategy_name, signal.direction,
+            symbol=alpaca_ticker, regime=signal_regime,
+        )
+        if sample_size < _cfg.MIN_EXPECTANCY_SAMPLES:
+            ev_r, sample_size = get_strategy_expectancy(signal.strategy_name, signal.direction)
+
+        # 1. Position sizing (ML multiplier baked in for portfolio heat)
+        notional = self.calculate_position_size(
+            signal, account_equity, signal_regime=signal_regime,
+            ml_multiplier=ml_multiplier,
+            ev_r=ev_r, sample_size=sample_size,
+        )
         if notional <= 0:
             self.logger.info(
                 "Signal rejected: %s %s — Position size is zero",
@@ -706,7 +748,8 @@ class RiskManager:
 
         # 2. Validate signal with full liquidity awareness
         valid, reason = self.validate_signal(
-            signal, signal_regime=signal_regime, df=df, quote=quote, notional=notional
+            signal, signal_regime=signal_regime, df=df, quote=quote, notional=notional,
+            ev_r=ev_r, sample_size=sample_size,
         )
         if not valid:
             self.logger.info("Signal rejected: %s %s — %s", signal.direction, signal.ticker, reason)

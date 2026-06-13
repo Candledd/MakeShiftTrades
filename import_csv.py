@@ -28,7 +28,7 @@ def migrate_csv_to_db():
         "MR_RSI_OVERSOLD": FloatDistribution(20.0, 40.0, step=1.0),
         "MR_RSI_OVERBOUGHT": FloatDistribution(60.0, 80.0, step=1.0),
         "TP_BB_STD": FloatDistribution(1.5, 3.0, step=0.1),
-        "MB_DONCHIAN_PERIOD": IntDistribution(10, 40),
+        "MB_DONCHIAN_PERIOD": IntDistribution(36, 72),
         "MR_STOP_MULT": FloatDistribution(1.0, 4.0, step=0.1),
         "TP_STOP_MULT": FloatDistribution(1.0, 4.0, step=0.1),
         "TP_PULLBACK_BUFFER": FloatDistribution(1.000, 1.010, step=0.001),

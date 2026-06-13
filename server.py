@@ -897,7 +897,10 @@ def api_bot_configure():
                 return jsonify({"ok": False, "error": "max_risk_pct must be between 0.001 and 0.1"}), 400
             config.MAX_RISK_PCT = val
         if "max_positions" in data:
-            config.MAX_POSITIONS = int(data["max_positions"])
+            val = int(data["max_positions"])
+            if not (1 <= val <= 20):
+                return jsonify({"ok": False, "error": "max_positions must be between 1 and 20"}), 400
+            config.MAX_POSITIONS = val
         if "scan_interval" in data:
             val = float(data["scan_interval"])
             if not (60 <= val <= 3600):

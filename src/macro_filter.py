@@ -9,95 +9,77 @@ pre_window, post_window, and actions.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import threading
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Tuple, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# ── Event Severity Constants (kept for backward compatibility) ─────────────
-SEVERITY_NORMAL = "normal"
-SEVERITY_NO_NEW_ENTRIES = "no_new_entries"
-SEVERITY_FLATTEN_ALL = "flatten_all"
-
-# Mock explicit event list using realistic schemas
-MOCK_EVENTS: List[Dict[str, Any]] = [
-    # FOMC Events
-    {
-        "event_name": "FOMC",
-        "event_time_utc": datetime(2026, 6, 17, 18, 0, tzinfo=timezone.utc),
-        "affected_assets": ["all"],
-        "pre_window": 120,
-        "post_window": 30,
-        "actions": ["no_new_entries", "flatten_intraday_only"]
-    },
-    {
-        "event_name": "FOMC",
-        "event_time_utc": datetime(2026, 7, 29, 18, 0, tzinfo=timezone.utc),
-        "affected_assets": ["all"],
-        "pre_window": 120,
-        "post_window": 30,
-        "actions": ["no_new_entries", "flatten_intraday_only"]
-    },
-    # NFP Events
-    {
-        "event_name": "NFP",
-        "event_time_utc": datetime(2026, 6, 5, 12, 30, tzinfo=timezone.utc),
-        "affected_assets": ["SPY", "QQQ", "BTC-USD"],
-        "pre_window": 60,
-        "post_window": 30,
-        "actions": ["no_new_entries", "flatten_intraday_only"]
-    },
-    {
-        "event_name": "NFP",
-        "event_time_utc": datetime(2026, 7, 3, 12, 30, tzinfo=timezone.utc),
-        "affected_assets": ["SPY", "QQQ", "BTC-USD"],
-        "pre_window": 60,
-        "post_window": 30,
-        "actions": ["no_new_entries", "flatten_intraday_only"]
-    },
-    # CPI Events
-    {
-        "event_name": "CPI",
-        "event_time_utc": datetime(2026, 6, 12, 12, 30, tzinfo=timezone.utc),
-        "affected_assets": ["SPY", "QQQ", "BTC-USD", "GLD", "PDBC"],
-        "pre_window": 60,
-        "post_window": 30,
-        "actions": ["no_new_entries"]
-    },
-    {
-        "event_name": "CPI",
-        "event_time_utc": datetime(2026, 7, 14, 12, 30, tzinfo=timezone.utc),
-        "affected_assets": ["SPY", "QQQ", "BTC-USD", "GLD", "PDBC"],
-        "pre_window": 60,
-        "post_window": 30,
-        "actions": ["no_new_entries"]
-    },
-    # EIA / OPEC Events
-    {
-        "event_name": "EIA",
-        "event_time_utc": datetime(2026, 6, 10, 14, 30, tzinfo=timezone.utc),
-        "affected_assets": ["PDBC"],
-        "pre_window": 30,
-        "post_window": 30,
-        "actions": ["no_new_entries"]
-    },
-    {
-        "event_name": "OPEC",
-        "event_time_utc": datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc),
-        "affected_assets": ["PDBC"],
-        "pre_window": 60,
-        "post_window": 120,
-        "actions": ["no_new_entries"]
-    }
-]
-
 
 class MacroFilter:
     """Schedule-based macro-event red-flag window detector using explicit event lists."""
 
-    @staticmethod
-    def check_event(dt_or_ts: float | datetime) -> List[Dict[str, Any]]:
+    _events: List[Dict[str, Any]] = []
+    _last_mtime: float = 0.0
+    _last_check_time: float = 0.0
+    _CHECK_INTERVAL: float = 5.0
+    _lock = threading.Lock()
+    _calendar_path: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "macro_calendar.json")
+
+    @classmethod
+    def _load_events(cls) -> List[Dict[str, Any]]:
+        """Load events from macro_calendar.json, caching by mtime for hot-reloading.
+
+        If the file has been modified since the last load (or this is the first
+        call), re-read and parse the JSON.  On any error (missing file, invalid
+        JSON, missing keys, etc.) the error is logged and an empty list is
+        returned.
+        """
+        with cls._lock:
+            now = time.time()
+            if now - cls._last_check_time < cls._CHECK_INTERVAL and cls._events:
+                return cls._events
+            cls._last_check_time = now
+
+            try:
+                current_mtime = os.path.getmtime(cls._calendar_path)
+                if current_mtime == cls._last_mtime and cls._events:
+                    return cls._events
+
+                with open(cls._calendar_path, "r") as f:
+                    raw_events: List[Dict[str, Any]] = json.load(f)
+
+                parsed = []
+                for event in raw_events:
+                    try:
+                        dt = datetime.fromisoformat(event["time_utc"].replace("Z", "+00:00"))
+                        event_time_utc = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                        parsed.append({
+                            "event_name": event["name"],
+                            "event_time_utc": event_time_utc,
+                            "affected_assets": event.get("affected_assets", []),
+                            "pre_window_td": timedelta(minutes=int(event["pre_window"])),
+                            "post_window_td": timedelta(minutes=int(event["post_window"])),
+                            "actions": event.get("actions", [])
+                        })
+                    except Exception as item_err:
+                        logger.warning("Skipping invalid event %s: %s", event, item_err)
+
+                cls._events = parsed
+                cls._last_mtime = current_mtime
+                return cls._events
+            except Exception as e:
+                logger.error("Failed to load macro calendar from %s: %s", cls._calendar_path, e)
+                cls._events = []
+                cls._last_mtime = 0.0
+                return []
+
+    @classmethod
+    def check_event(cls, dt_or_ts: float | datetime) -> List[Dict[str, Any]]:
         """Check if the given datetime or timestamp falls inside any active events.
 
         Parameters
@@ -122,17 +104,17 @@ class MacroFilter:
             raise TypeError("dt_or_ts must be a float timestamp or a datetime object")
 
         active_events = []
-        for event in MOCK_EVENTS:
+        for event in cls._load_events():
             event_time = event["event_time_utc"]
-            pre_win = timedelta(minutes=event["pre_window"])
-            post_win = timedelta(minutes=event["post_window"])
-            
-            start_time = event_time - pre_win
-            end_time = event_time + post_win
-            
+            pre_win_td = event["pre_window_td"]
+            post_win_td = event["post_window_td"]
+
+            start_time = event_time - pre_win_td
+            end_time = event_time + post_win_td
+
             if start_time <= dt < end_time:
                 active_events.append(event)
-                
+
         return active_events
 
     @staticmethod

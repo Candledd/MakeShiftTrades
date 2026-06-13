@@ -1092,20 +1092,57 @@ class AlpacaTrader:
 
         return False, f"terminal_{status or 'unknown'}", None
 
+
+    def record_virtual_trade(self, signal, reject_reason: str, notional: float, regime: str):
+        """Record a virtual (rejected/backtest) trade in the order journal."""
+        virtual_id = f"virtual_{signal.ticker}_{int(time.time())}"
+        alpaca_ticker = self.map_ticker(signal.ticker)
+        meta = {
+            "strategy": signal.strategy_name,
+            "timeframe": getattr(signal, 'timeframe', '15m'),
+            "confidence": signal.confidence,
+            "reason": signal.reason,
+            "atr": getattr(signal, 'atr', 0.0),
+            "regime": regime,
+            "reject_reason": reject_reason,
+        }
+        self._state.setdefault("order_journal", {})[virtual_id] = {
+            "order_id": virtual_id,
+            "ticker": signal.ticker,
+            "symbol": alpaca_ticker,
+            "side": signal.direction.upper(),
+            "entry": float(signal.entry),
+            "stop_loss": float(signal.stop_loss),
+            "take_profit": float(signal.take_profit),
+            "confidence": float(signal.confidence),
+            "submitted_ts": time.time(),
+            "settled": False,
+            "is_virtual": True,
+            "notional": notional,
+            "metadata": meta,
+        }
+        self._save_state()
+
     def sync_closed_trades(self) -> Dict[str, Any]:
         """Poll Alpaca for terminal orders, derive outcomes, and queue ML feedback."""
+        import pandas as pd
+        from charts.data import fetch_ohlcv
+        VIRTUAL_TRADE_MAX_AGE_SECONDS = 5 * 86400
+        MAX_SETTLED_JOURNAL_ENTRIES = 200
+
         journals = self._state.get("order_journal", {})
         if not journals:
             return {"ok": True, "processed": 0, "queued": 0}
 
         processed = 0
         queued = 0
+        ticker_dfs = {}
 
         for order_id, rec in list(journals.items()):
             if rec.get("settled"):
                 continue
 
-            if rec.get("is_virtual_veto"):
+            if rec.get("is_virtual_veto") or rec.get("is_virtual"):
                 # Handle virtual veto trade outcome check
                 ticker = rec.get("ticker")
                 symbol = rec.get("symbol")
@@ -1115,65 +1152,77 @@ class AlpacaTrader:
                 side = str(rec.get("side", "BUY")).upper()
                 submitted_ts = float(rec.get("submitted_ts", time.time()))
                 
-                # Fetch recent bars since submitted_ts
-                from charts.data import fetch_ohlcv
-                import pandas as pd
                 try:
-                    df = fetch_ohlcv(ticker, period="5d", interval="15m")
-                    start_dt = pd.to_datetime(submitted_ts, unit='s', utc=True)
-                    df_after = df[df.index >= start_dt]
-                    
-                    outcome = None
-                    exit_price = None
-                    exit_time = None
-                    for idx, row in df_after.iterrows():
-                        low = float(row["Low"])
-                        high = float(row["High"])
+                    # Check if expired (>5 days)
+                    if time.time() - submitted_ts > VIRTUAL_TRADE_MAX_AGE_SECONDS:
+                        outcome = "expired"
+                        exit_price = entry_price
+                        exit_time = time.time()
+                    else:
+                        # Fetch OHLCV with caching per ticker
+                        if ticker not in ticker_dfs:
+                            ticker_dfs[ticker] = fetch_ohlcv(ticker, period="5d", interval="15m")
+                        df = ticker_dfs[ticker]
+                        if df is None:
+                            raise ValueError(f"No OHLCV data returned for {ticker}")
+                        start_dt = pd.to_datetime(submitted_ts, unit='s', utc=True)
+                        df_after = df[df.index >= start_dt]
                         
-                        # Check stop loss and take profit
-                        if side == "BUY":
-                            if low <= stop_loss and high >= take_profit:
-                                outcome = "stop_loss_hit"
-                                exit_price = stop_loss
-                                exit_time = idx.timestamp()
-                                break
-                            elif low <= stop_loss:
-                                outcome = "stop_loss_hit"
-                                exit_price = stop_loss
-                                exit_time = idx.timestamp()
-                                break
-                            elif high >= take_profit:
-                                outcome = "take_profit_hit"
-                                exit_price = take_profit
-                                exit_time = idx.timestamp()
-                                break
-                        else:  # SELL
-                            if high >= stop_loss and low <= take_profit:
-                                outcome = "stop_loss_hit"
-                                exit_price = stop_loss
-                                exit_time = idx.timestamp()
-                                break
-                            elif high >= stop_loss:
-                                outcome = "stop_loss_hit"
-                                exit_price = stop_loss
-                                exit_time = idx.timestamp()
-                                break
-                            elif low <= take_profit:
-                                outcome = "take_profit_hit"
-                                exit_price = take_profit
-                                exit_time = idx.timestamp()
-                                break
+                        outcome = None
+                        exit_price = None
+                        exit_time = None
+                        for idx, row in df_after.iterrows():
+                            low = float(row["Low"])
+                            high = float(row["High"])
+                            
+                            # Check stop loss and take profit
+                            if side == "BUY":
+                                if low <= stop_loss and high >= take_profit:
+                                    outcome = "stop_loss_hit"
+                                    exit_price = stop_loss
+                                    exit_time = idx.timestamp()
+                                    break
+                                elif low <= stop_loss:
+                                    outcome = "stop_loss_hit"
+                                    exit_price = stop_loss
+                                    exit_time = idx.timestamp()
+                                    break
+                                elif high >= take_profit:
+                                    outcome = "take_profit_hit"
+                                    exit_price = take_profit
+                                    exit_time = idx.timestamp()
+                                    break
+                            else:  # SELL
+                                if high >= stop_loss and low <= take_profit:
+                                    outcome = "stop_loss_hit"
+                                    exit_price = stop_loss
+                                    exit_time = idx.timestamp()
+                                    break
+                                elif high >= stop_loss:
+                                    outcome = "stop_loss_hit"
+                                    exit_price = stop_loss
+                                    exit_time = idx.timestamp()
+                                    break
+                                elif low <= take_profit:
+                                    outcome = "take_profit_hit"
+                                    exit_price = take_profit
+                                    exit_time = idx.timestamp()
+                                    break
                     
                     if outcome:
-                        worked = (outcome == "take_profit_hit")
-                        reason = outcome
-                        
-                        pnl_pct = 0.0
-                        if exit_price and entry_price > 0:
-                            signed = (exit_price - entry_price) / entry_price
-                            if side == "SELL":
-                                signed *= -1.0
-                            pnl_pct = float(signed * 100.0)
+                        if outcome == "expired":
+                            worked = False
+                            reason = "expired"
+                            pnl_pct = 0.0
+                        else:
+                            worked = (outcome == "take_profit_hit")
+                            reason = outcome
+                            pnl_pct = 0.0
+                            if exit_price and entry_price > 0:
+                                signed = (exit_price - entry_price) / entry_price
+                                if side == "SELL":
+                                    signed *= -1.0
+                                pnl_pct = float(signed * 100.0)
                         
                         feedback = {
                             "order_id": order_id,
@@ -1190,6 +1239,7 @@ class AlpacaTrader:
                             "closed_ts": exit_time or time.time(),
                             "feature_row": (rec.get("metadata") or {}).get("feature_row"),
                             "signal_reason": (rec.get("metadata") or {}).get("signal_reason"),
+                            "metadata": rec.get("metadata", {}),
                         }
                         
                         self._state.setdefault("ml_feedback_queue", []).append(feedback)
@@ -1305,8 +1355,9 @@ class AlpacaTrader:
                 "closed_ts": time.time(),
                 "feature_row": (rec.get("metadata") or {}).get("feature_row"),
                 "signal_reason": (rec.get("metadata") or {}).get("signal_reason"),
+                "metadata": rec.get("metadata", {}),
             }
-
+            
             self._state.setdefault("ml_feedback_queue", []).append(feedback)
             rec["settled"] = True
             rec["result_reason"] = reason
@@ -1334,15 +1385,14 @@ class AlpacaTrader:
         for key, rec in journals.items():
             if rec.get("settled") and rec.get("closed_ts"):
                 settled.append((key, float(rec["closed_ts"])))
-        if len(settled) > 200:
+        if len(settled) > MAX_SETTLED_JOURNAL_ENTRIES:
             settled.sort(key=lambda x: x[1], reverse=True)
-            keep = {k for k, _ in settled[:200]}
-            for key, _ in settled[200:]:
-                if key not in keep:
-                    del journals[key]
+            for key, _ in settled[MAX_SETTLED_JOURNAL_ENTRIES:]:
+                del journals[key]
             logger.info(
-                "Pruned %d settled journal entries (kept 200 most recent).",
-                len(settled) - 200,
+                "Pruned %d settled journal entries (kept %d most recent).",
+                len(settled) - MAX_SETTLED_JOURNAL_ENTRIES,
+                MAX_SETTLED_JOURNAL_ENTRIES,
             )
 
         self._save_state()

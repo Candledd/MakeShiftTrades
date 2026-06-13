@@ -252,6 +252,11 @@ class MeanReversionStrategy(BaseStrategy):
             f"VolRatio={vol_ratio:.1f}x"
         )
 
+        # -- Trailing stop logic coupled to playbook --------------------
+        #   A_CLIMAX → "vwap"      (trail along VWAP as it moves)
+        #   B_QUIET  → "vwap"      (full exit via VWAP; could become "no_runner")
+        trail_logic = "vwap" if playbook == "A_CLIMAX" else "vwap"
+
         # -- Record signal ----------------------------------------------
         self.record_signal(ticker)
 
@@ -269,5 +274,5 @@ class MeanReversionStrategy(BaseStrategy):
             timestamp=datetime.now(timezone.utc),
             order_type=order_type,
             time_stop_bars=6,
-            trailing_stop_logic="breakeven_only",
+            trailing_stop_logic=trail_logic,
         )

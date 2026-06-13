@@ -1,0 +1,66 @@
+[
+    {
+        "event_name": "FOMC",
+        "time_utc": "2026-06-17T18:00:00+00:00",
+        "affected_assets": ["all"],
+        "pre_window": 120,
+        "post_window": 30,
+        "actions": ["no_new_entries", "flatten_intraday_only"]
+    },
+    {
+        "event_name": "FOMC",
+        "time_utc": "2026-07-29T18:00:00+00:00",
+        "affected_assets": ["all"],
+        "pre_window": 120,
+        "post_window": 30,
+        "actions": ["no_new_entries", "flatten_intraday_only"]
+    },
+    {
+        "event_name": "NFP",
+        "time_utc": "2026-06-05T12:30:00+00:00",
+        "affected_assets": ["SPY", "QQQ", "BTC-USD"],
+        "pre_window": 60,
+        "post_window": 30,
+        "actions": ["no_new_entries", "flatten_intraday_only"]
+    },
+    {
+        "event_name": "NFP",
+        "time_utc": "2026-07-03T12:30:00+00:00",
+        "affected_assets": ["SPY", "QQQ", "BTC-USD"],
+        "pre_window": 60,
+        "post_window": 30,
+        "actions": ["no_new_entries", "flatten_intraday_only"]
+    },
+    {
+        "event_name": "CPI",
+        "time_utc": "2026-06-12T12:30:00+00:00",
+        "affected_assets": ["SPY", "QQQ", "BTC-USD", "GLD", "PDBC"],
+        "pre_window": 60,
+        "post_window": 30,
+        "actions": ["no_new_entries"]
+    },
+    {
+        "event_name": "CPI",
+        "time_utc": "2026-07-14T12:30:00+00:00",
+        "affected_assets": ["SPY", "QQQ", "BTC-USD", "GLD", "PDBC"],
+        "pre_window": 60,
+        "post_window": 30,
+        "actions": ["no_new_entries"]
+    },
+    {
+        "event_name": "EIA",
+        "time_utc": "2026-06-10T14:30:00+00:00",
+        "affected_assets": ["PDBC"],
+        "pre_window": 30,
+        "post_window": 30,
+        "actions": ["no_new_entries"]
+    },
+    {
+        "event_name": "OPEC",
+        "time_utc": "2026-06-18T12:00:00+00:00",
+        "affected_assets": ["PDBC"],
+        "pre_window": 60,
+        "post_window": 120,
+        "actions": ["no_new_entries"]
+    }
+]

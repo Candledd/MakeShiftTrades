@@ -70,6 +70,31 @@ except ValueError:
     raise ValueError("MIN_EXPECTANCY_SAMPLES must be a valid integer")
 
 try:
+    EXPECTANCY_SOFT_BAND_1_MIN = int(os.getenv("EXPECTANCY_SOFT_BAND_1_MIN", "5"))
+except ValueError:
+    raise ValueError("EXPECTANCY_SOFT_BAND_1_MIN must be a valid integer")
+
+try:
+    EXPECTANCY_SOFT_BAND_1_MULT = float(os.getenv("EXPECTANCY_SOFT_BAND_1_MULT", "0.5"))
+except ValueError:
+    raise ValueError("EXPECTANCY_SOFT_BAND_1_MULT must be a valid number")
+
+try:
+    EXPECTANCY_SOFT_BAND_2_MIN = int(os.getenv("EXPECTANCY_SOFT_BAND_2_MIN", "20"))
+except ValueError:
+    raise ValueError("EXPECTANCY_SOFT_BAND_2_MIN must be a valid integer")
+
+try:
+    EXPECTANCY_SOFT_BAND_2_MULT = float(os.getenv("EXPECTANCY_SOFT_BAND_2_MULT", "0.25"))
+except ValueError:
+    raise ValueError("EXPECTANCY_SOFT_BAND_2_MULT must be a valid number")
+
+try:
+    EXPECTANCY_HARD_DISABLE_SAMPLES = int(os.getenv("EXPECTANCY_HARD_DISABLE_SAMPLES", "50"))
+except ValueError:
+    raise ValueError("EXPECTANCY_HARD_DISABLE_SAMPLES must be a valid integer")
+
+try:
     MAX_VIX_THRESHOLD = float(os.getenv("MAX_VIX_THRESHOLD", "30.0"))
 except ValueError:
     raise ValueError("MAX_VIX_THRESHOLD must be a valid number")
@@ -239,7 +264,7 @@ except ValueError:
 
 # ── Momentum Breakout Strategy (BTC — 1h) ────────────────────────────────────
 try:
-    MB_DONCHIAN_PERIOD = int(os.getenv("MB_DONCHIAN_PERIOD", "31"))
+    MB_DONCHIAN_PERIOD = int(os.getenv("MB_DONCHIAN_PERIOD", "48"))
 except ValueError:
     raise ValueError("MB_DONCHIAN_PERIOD must be a valid integer")
 
@@ -599,6 +624,11 @@ for _name, _val, _label in [
     ("MAX_WEEKLY_LOSS_PCT", MAX_WEEKLY_LOSS_PCT, "<= 0"),
     ("MIN_EXPECTANCY_R", MIN_EXPECTANCY_R, "> 0"),
     ("MIN_EXPECTANCY_SAMPLES", MIN_EXPECTANCY_SAMPLES, ">= 1"),
+    ("EXPECTANCY_SOFT_BAND_1_MIN", EXPECTANCY_SOFT_BAND_1_MIN, ">= 1"),
+    ("EXPECTANCY_SOFT_BAND_1_MULT", EXPECTANCY_SOFT_BAND_1_MULT, "> 0"),
+    ("EXPECTANCY_SOFT_BAND_2_MIN", EXPECTANCY_SOFT_BAND_2_MIN, ">= 1"),
+    ("EXPECTANCY_SOFT_BAND_2_MULT", EXPECTANCY_SOFT_BAND_2_MULT, "> 0"),
+    ("EXPECTANCY_HARD_DISABLE_SAMPLES", EXPECTANCY_HARD_DISABLE_SAMPLES, ">= 1"),
     ("MAX_RISK_PCT", MAX_RISK_PCT, "> 0"),
     ("MAX_POSITION_PCT", MAX_POSITION_PCT, "> 0"),
     ("MAX_NOTIONAL", MAX_NOTIONAL, "> 0"),
@@ -617,7 +647,7 @@ for _name, _val, _label in [
     ("MR_BB_PERIOD", MR_BB_PERIOD, ">= 2"),
     ("MR_BB_STD", MR_BB_STD, "> 0"),
     ("MR_RSI_PERIOD", MR_RSI_PERIOD, ">= 2"),
-    ("MB_DONCHIAN_PERIOD", MB_DONCHIAN_PERIOD, ">= 2"),
+    ("MB_DONCHIAN_PERIOD", MB_DONCHIAN_PERIOD, ">= 10"),
     ("MB_ADX_THRESHOLD", MB_ADX_THRESHOLD, "> 0"),
     ("MB_ATR_TARGET_MULT", MB_ATR_TARGET_MULT, "> 0"),
     ("MB_SQUEEZE_BB_MULT", MB_SQUEEZE_BB_MULT, "> 0"),

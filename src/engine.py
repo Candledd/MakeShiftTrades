@@ -323,12 +323,15 @@ class TradingEngine:
                     routing = getattr(config, "ROUTING_TREND_PULLBACK", "ENABLED")
                     if routing == "DISABLED":
                         logger.debug("Signal rejected: trend_pullback disabled in current regime.")
+                        if self.trader: self.trader.record_virtual_trade(signal, "Routing: trend_pullback disabled", 1.0, self._get_signal_regime(ticker))
                         continue
                     elif routing == "LONG_ONLY" and signal.direction != "BUY":
                         logger.debug("Signal rejected: trend_pullback restricted to long-only.")
+                        if self.trader: self.trader.record_virtual_trade(signal, "Routing: long-only restriction", 1.0, self._get_signal_regime(ticker))
                         continue
                     elif routing == "SHORT_ONLY" and signal.direction != "SELL":
                         logger.debug("Signal rejected: trend_pullback restricted to short-only.")
+                        if self.trader: self.trader.record_virtual_trade(signal, "Routing: short-only restriction", 1.0, self._get_signal_regime(ticker))
                         continue
                     elif routing == "REDUCED":
                         # Simulate reducing risk or confidence
@@ -338,19 +341,24 @@ class TradingEngine:
                     routing = getattr(config, "ROUTING_MEAN_REVERSION", "BOTH")
                     if routing == "DISABLED":
                         logger.debug("Signal rejected: mean_reversion disabled in current regime.")
+                        if self.trader: self.trader.record_virtual_trade(signal, "Routing: mean_reversion disabled", 1.0, self._get_signal_regime(ticker))
                         continue
                     elif routing == "LONG_ONLY" and signal.direction != "BUY":
                         logger.debug("Signal rejected: mean_reversion restricted to long-only.")
+                        if self.trader: self.trader.record_virtual_trade(signal, "Routing: long-only restriction", 1.0, self._get_signal_regime(ticker))
                         continue
                     elif routing == "SHORT_ONLY" and signal.direction != "SELL":
                         logger.debug("Signal rejected: mean_reversion restricted to short-only.")
+                        if self.trader: self.trader.record_virtual_trade(signal, "Routing: short-only restriction", 1.0, self._get_signal_regime(ticker))
                         continue
                     elif routing == "LONG_ONLY_HIGH_QUALITY":
                         if signal.direction != "BUY":
                             logger.debug("Signal rejected: mean_reversion restricted to long-only.")
+                            if self.trader: self.trader.record_virtual_trade(signal, "Routing: long-only restriction", 1.0, self._get_signal_regime(ticker))
                             continue
                         if signal.confidence < 70.0:
                             logger.debug("Signal rejected: mean_reversion requires high quality in this regime.")
+                            if self.trader: self.trader.record_virtual_trade(signal, "Routing: high-quality requirement missed", 1.0, self._get_signal_regime(ticker))
                             continue
                     elif routing == "TINY_FAILED_EXTENSIONS_ONLY":
                         # Significantly reduce confidence/risk for this trade
@@ -394,21 +402,30 @@ class TradingEngine:
                     if self.ml_model is not None:
                         feedback_records = self.trader.drain_ml_feedback_queue()
                         for fb in feedback_records:
+                            # Log every feedback record to virtual_trades_outcomes.jsonl
+                            try:
+                                with open("virtual_trades_outcomes.jsonl", "a") as f:
+                                    f.write(json.dumps(fb) + "\n")
+                            except Exception as je:
+                                logger.warning("Failed to write virtual trade outcome: %s", je)
+
                             ticker = fb.get("ticker", "")
                             fb_strategy = (fb.get("metadata") or {}).get("strategy") \
                                           or fb.get("signal_reason", "unknown")
                             regime = self._get_signal_regime(ticker)
                             reason = fb.get("result_reason", "unknown")
-                            try:
-                                self.ml_model._track_veto_outcome(
-                                    strategy=fb_strategy,
-                                    regime=regime,
-                                    ticker=ticker,
-                                    sizing_multiplier=1.0,  # not available in feedback
-                                    outcome=reason,
-                                )
-                            except Exception as tx:
-                                logger.warning("Failed to track veto outcome: %s", tx)
+                            reject_reason = (fb.get("metadata") or {}).get("reject_reason", "")
+                            if reject_reason.startswith("Strong ML disagreement"):
+                                try:
+                                    self.ml_model._track_veto_outcome(
+                                        strategy=fb_strategy,
+                                        regime=regime,
+                                        ticker=ticker,
+                                        sizing_multiplier=1.0,  # not available in feedback
+                                        outcome=reason,
+                                    )
+                                except Exception as tx:
+                                    logger.warning("Failed to track veto outcome: %s", tx)
             except Exception as exc:
                 logger.warning("Trade sync / ML feedback drain failed: %s", exc)
 
@@ -465,7 +482,14 @@ class TradingEngine:
         self,
         signals_with_data: list[tuple[StrategySignal, Optional[pd.DataFrame]]],
     ) -> list[tuple[StrategySignal, Optional[pd.DataFrame]]]:
-        """Rank signals by composite score and return the single highest-scored signal.
+        """Rank signals by composite score per risk bucket and return up to one per bucket.
+
+        Risk buckets:
+          "equity_beta"      — SPY, QQQ
+          "crypto"           — BTC-USD, BTC
+          "gold"             — GLD
+          "broad_commodity"  — PDBC
+          "general"          — anything else
 
         Each signal receives a composite score based on:
           · Expected EV    (historical R-multiple from the trade log)
@@ -474,13 +498,33 @@ class TradingEngine:
           · ML agreement   (sizing_multiplier produced by the ML model)
           · Slippage       (spread estimate penalty)
 
-        Only the single highest-scored signal across all instruments is returned.
+        The highest-scoring signal from each bucket is returned, allowing
+        simultaneous execution of non-competing assets (e.g. SPY and GLD).
         """
-        # Collect all scored signals in a flat list
-        scored_signals: list[tuple[float, StrategySignal, Optional[pd.DataFrame]]] = []
+        # 1. Ticker-to-bucket mapping — keys use the resolved canonical form
+        BUCKET_MAP: dict[str, str] = {
+            "SPY": "equity_beta",
+            "QQQ": "equity_beta",
+            "BTCUSD": "crypto",
+            "GLD": "gold",
+            "PDBC": "broad_commodity",
+        }
+
+        # 2. Initialise bucket storage
+        scored_signals: dict[str, list[tuple[float, StrategySignal, Optional[pd.DataFrame]]]] = {
+            "equity_beta": [],
+            "crypto": [],
+            "gold": [],
+            "broad_commodity": [],
+            "general": [],
+        }
 
         for signal, df in signals_with_data:
-            # 1. Expected EV from database
+            # ---- Constants for scoring ----
+            LIQUIDITY_ATR_CEILING = 0.05
+            SLIPPAGE_FRICTION = 0.1
+
+            # 3. Compute composite score
             alpaca_ticker = self.risk_manager._resolve_ticker(signal.ticker)
             regime = self._get_signal_regime(signal.ticker)
 
@@ -494,32 +538,23 @@ class TradingEngine:
                 )
             expected_ev = ev_r
 
-            # 2. Regime fit score (0–1)
-            regime_fit = self._calc_regime_fit_score(regime, signal.strategy_name)
+            regime_fit = self._calc_regime_fit_score(regime, signal.strategy_name, signal.direction, alpaca_ticker)
 
-            # 3. Liquidity score (0–1, higher = more liquid)
             atr_pct = (signal.atr / signal.entry) if signal.atr > 0 and signal.entry > 0 else 0.0
-            # Linear falloff: 0% ATR → 1.0, 5% ATR → 0.0
-            liquidity_score = max(0.0, 1.0 - atr_pct / 0.05)
+            liquidity_score = max(0.0, 1.0 - atr_pct / LIQUIDITY_ATR_CEILING)
 
-            # 4. ML agreement — fetch sizing_multiplier from the model and attach to signal
             ml_agreement = 0.0
             if config.ML_VETO_ENABLED and self.ml_model is not None and df is not None and len(df) >= 40:
                 try:
                     ml_result = self.ml_model.evaluate_signal(df, signal.direction)
                     sizing_multiplier = ml_result.get("sizing_multiplier", 1.0)
-                    # Attach sizing_multiplier to the signal for later consumption
                     signal.sizing_multiplier = sizing_multiplier
-                    # sizing_multiplier ∈ [0, ~2], centred at 1.0.
-                    # Convert to agreement offset:  1.0 → 0,  1.5 → +0.5,  0.5 → -0.5
                     ml_agreement = sizing_multiplier - 1.0
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("ML evaluate_signal failed: %s", exc)
 
-            # 5. Slippage penalty (spread estimate)
-            slippage_penalty = atr_pct * 0.1
+            slippage_penalty = atr_pct * SLIPPAGE_FRICTION
 
-            # Composite score
             composite_score = expected_ev + regime_fit + liquidity_score + ml_agreement - slippage_penalty
 
             logger.info(
@@ -530,33 +565,45 @@ class TradingEngine:
                 ml_agreement, slippage_penalty, composite_score,
             )
 
-            scored_signals.append((composite_score, signal, df))
+            # 4. Assign to the appropriate bucket using the resolved ticker
+            bucket = BUCKET_MAP.get(alpaca_ticker, "general")
+            scored_signals[bucket].append((composite_score, signal, df))
 
-        # ---- Select the single highest-scored signal overall ----
-        if not scored_signals:
-            return []
+        # 5. Select the top signal per bucket
+        winners: list[tuple[StrategySignal, Optional[pd.DataFrame]]] = []
+        for bucket_name, bucket_list in scored_signals.items():
+            if not bucket_list:
+                continue
 
-        scored_signals.sort(key=lambda x: x[0], reverse=True)
-        best_score, best_signal, best_df = scored_signals[0]
+            bucket_list.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_signal, best_df = bucket_list[0]
 
-        if len(scored_signals) > 1:
             logger.info(
-                "[RANK-SELECT] Selected %s %s %s (score=%+.4f) over %d competing signal(s)",
+                "[RANK-SELECT] [%s] Selected %s %s %s (score=%+.4f) over %d competing signal(s) in bucket",
+                bucket_name,
                 best_signal.direction, best_signal.ticker, best_signal.strategy_name,
-                best_score, len(scored_signals) - 1,
+                best_score, len(bucket_list) - 1,
             )
 
-        return [(best_signal, best_df)]
+            winners.append((best_signal, best_df))
+
+        if not winners:
+            return []
+
+        return winners
 
     # ──────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _calc_regime_fit_score(regime: str, strategy_name: str) -> float:
+    def _calc_regime_fit_score(regime: str, strategy_name: str, direction: str, ticker: str) -> float:
         """Return a 0–1 score indicating how well *strategy* fits *regime*.
 
         Regime labels come from the AI Tuner and are one of:
             Bullish Calm, Bullish Volatile, Range-Bound Calm,
             Bearish Chop, Bearish Volatile, or unknown.
+
+        Direction-aware: for trend/momentum strategies, SELL signals invert
+        the scoring to favor bearish regimes.
         """
         regime_lower = regime.lower().strip()
 
@@ -570,28 +617,34 @@ class TradingEngine:
                 "bullish volatile": 0.3,
                 "bearish volatile": 0.1,
             }
-        elif strategy_name in ("trend_pullback", "trend_following"):
-            # Trend strategies need directional movement
-            fit_map = {
-                "bullish calm": 1.0,
-                "bullish volatile": 0.8,
-                "range-bound calm": 0.6,
-                "bearish chop": 0.3,
-                "bearish volatile": 0.1,
-            }
-        elif strategy_name == "momentum_breakout":
-            # Momentum breakout requires strong trending conditions
-            fit_map = {
-                "bullish calm": 1.0,
-                "bullish volatile": 0.9,
-                "range-bound calm": 0.5,
-                "bearish chop": 0.2,
-                "bearish volatile": 0.0,
-            }
-        else:
-            fit_map = {}
-
-        return fit_map.get(regime_lower, 0.5)
+        elif strategy_name in ("trend_pullback", "trend_following", "momentum_breakout"):
+            if direction == "SELL":
+                # SELL: favor bearish regimes, invert the bullish preference
+                fit_map = {
+                    "bearish volatile": 1.0,
+                    "bearish chop": 0.8,
+                    "range-bound calm": 0.5,
+                    "bullish calm": 0.1,
+                    "bullish volatile": 0.2,
+                }
+            else:
+                # BUY (default): favor bullish regimes
+                if strategy_name == "momentum_breakout":
+                    fit_map = {
+                        "bullish calm": 1.0,
+                        "bullish volatile": 0.9,
+                        "range-bound calm": 0.5,
+                        "bearish chop": 0.2,
+                        "bearish volatile": 0.0,
+                    }
+                else:
+                    fit_map = {
+                        "bullish calm": 1.0,
+                        "bullish volatile": 0.8,
+                        "range-bound calm": 0.6,
+                        "bearish chop": 0.3,
+                        "bearish volatile": 0.1,
+                    }
 
     def _execute_signal(self, signal: StrategySignal, df: pd.DataFrame = None) -> None:
         """Run approval pipeline and — if approved — place the order.
@@ -741,33 +794,8 @@ class TradingEngine:
                 reason_veto
             )
             
-            # Register in order_journal with is_virtual_veto: True
-            virtual_id = f"virtual_{signal.ticker}_{int(time.time())}"
-            alpaca_ticker = self.trader.map_ticker(signal.ticker)
-            meta = {
-                "strategy": signal.strategy_name,
-                "timeframe": signal.timeframe,
-                "confidence": signal.confidence,
-                "reason": signal.reason,
-                "atr": signal.atr,
-                "regime": self._get_signal_regime(signal.ticker),
-            }
-            self.trader._state.setdefault("order_journal", {})[virtual_id] = {
-                "order_id": virtual_id,
-                "ticker": signal.ticker,
-                "symbol": alpaca_ticker,
-                "side": signal.direction.upper(),
-                "entry": float(signal.entry),
-                "stop_loss": float(signal.stop_loss),
-                "take_profit": float(signal.take_profit),
-                "confidence": float(signal.confidence),
-                "submitted_ts": time.time(),
-                "settled": False,
-                "is_virtual_veto": True,
-                "notional": original_notional,
-                "metadata": meta,
-            }
-            self.trader._save_state()
+            # Record virtual trade in order journal
+            self.trader.record_virtual_trade(signal, reason_veto, original_notional, ml_regime)
 
             # Save virtual trade / veto log to vetoed_signals_tracker.jsonl
             try:
@@ -783,40 +811,21 @@ class TradingEngine:
             signal, equity, positions, active_orders,
             position_state=self._position_state,
             signal_regime=self._get_signal_regime(signal.ticker),
-            df=df, quote=mock_quote
+            df=df, quote=mock_quote,
+            ml_multiplier=ml_multiplier,
         )
 
-        # Apply sizing_multiplier to approved notional
-        if approved and ml_multiplier != 1.0:
-            original_notional = notional
-            notional *= ml_multiplier
-            if ml_multiplier > 1.0:
-                max_allowed = equity * self.risk_manager.max_position_pct
-                if notional > max_allowed:
-                    notional = max_allowed
-            notional = max(1.0, round(notional, 2))
+        # ML action tracking (notional already has ml_multiplier baked in from approve)
+        if approved:
             if ml_multiplier < 1.0:
                 ml_action = "REDUCE"
-                ml_action_reason = f"Reduced from ${original_notional:.2f} to ${notional:.2f} (sizing_multiplier={sizing_multiplier:.3f})"
-                logger.info(
-                    "[ML MILD DISAGREEMENT] %s %s: reducing position size from $%.2f to $%.2f (sizing_multiplier=%.3f)",
-                    signal.direction, signal.ticker, original_notional, notional, sizing_multiplier
-                )
-            else:
+                ml_action_reason = f"ML reduce: sizing_multiplier={sizing_multiplier:.3f}"
+            elif ml_multiplier > 1.0:
                 ml_action = "BOOST"
-                ml_action_reason = f"Boosted from ${original_notional:.2f} to ${notional:.2f} (sizing_multiplier={sizing_multiplier:.3f})"
-                logger.info(
-                    "[ML AGREEMENT BOOST] %s %s: boosting position size from $%.2f to $%.2f (sizing_multiplier=%.3f)",
-                    signal.direction, signal.ticker, original_notional, notional, sizing_multiplier
-                )
-        elif approved:
-            ml_action = "NEUTRAL"
-            ml_action_reason = f"ML neutral: sizing_multiplier={sizing_multiplier:.3f}"
-            logger.info(
-                "[ML OK] %s %s passed/scaled by ML filter (sizing_multiplier=%.3f, final_notional=%.2f)",
-                signal.direction, signal.ticker,
-                sizing_multiplier, notional
-            )
+                ml_action_reason = f"ML boost: sizing_multiplier={sizing_multiplier:.3f}"
+            else:
+                ml_action = "NEUTRAL"
+                ml_action_reason = f"ML neutral: sizing_multiplier={sizing_multiplier:.3f}"
 
         # Log every ML action (VETO already logged above) to the tracking file
         if approved:
@@ -846,6 +855,7 @@ class TradingEngine:
             logger.info(
                 "[REJECTED] %s %s: %s", signal.direction, signal.ticker, reason
             )
+            self.trader.record_virtual_trade(signal, reason, notional, self._get_signal_regime(signal.ticker))
             return
 
         if config.DRY_RUN:

@@ -210,7 +210,7 @@ def objective(trial):
     mr_rsi_oversold = trial.suggest_float("MR_RSI_OVERSOLD", 20.0, 40.0, step=1.0)
     mr_rsi_overbought = trial.suggest_float("MR_RSI_OVERBOUGHT", 60.0, 80.0, step=1.0)
     tp_bb_std = trial.suggest_float("TP_BB_STD", 1.5, 3.0, step=0.1)
-    mb_donchian_period = trial.suggest_int("MB_DONCHIAN_PERIOD", 10, 40)
+    mb_donchian_period = trial.suggest_int("MB_DONCHIAN_PERIOD", 36, 72)
     
     mr_stop_mult = trial.suggest_float("MR_STOP_MULT", 1.0, 4.0, step=0.1)
     tp_stop_mult = trial.suggest_float("TP_STOP_MULT", 1.0, 4.0, step=0.1)
