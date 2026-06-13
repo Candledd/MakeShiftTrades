@@ -21,9 +21,7 @@ def train_surrogate():
     if 'state' in df.columns:
         df = df[df['state'] == 'COMPLETE']
 
-    # Identify inputs (parameters) and output (target PnL)
     param_cols = [c for c in df.columns if c.startswith('params_')]
-    target_col = 'value'
     
     if len(param_cols) == 0:
         print("No parameter columns found in the CSV.")
@@ -33,70 +31,81 @@ def train_surrogate():
         print(f"Warning: Only {len(df)} rows found. XGBoost works best with 100+ rows.")
         
     X = df[param_cols].copy()
-    # Rename columns to drop the 'params_' prefix for readability in SHAP charts
     X.columns = [c.replace('params_', '') for c in X.columns]
-    y = df[target_col].copy()
+    
+    # Extract individual targets
+    y_mr = df['user_attrs_MR_PnL'].fillna(0).copy()
+    y_tp = df['user_attrs_TP_PnL'].fillna(0).copy()
+    y_mb = df['user_attrs_MB_PnL'].fillna(0).copy()
 
     # Split the data into train and test sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    print(f"Training XGBoost Surrogate Model on {len(X_train)} samples...")
-    model = xgb.XGBRegressor(
-        n_estimators=100, 
-        max_depth=4, 
-        learning_rate=0.1, 
-        random_state=42
+    X_train, X_test, mr_train, mr_test, tp_train, tp_test, mb_train, mb_test = train_test_split(
+        X, y_mr, y_tp, y_mb, test_size=0.2, random_state=42
     )
-    model.fit(X_train, y_train)
 
-    # Evaluate the model
-    y_pred = model.predict(X_test)
-    r2 = r2_score(y_test, y_pred)
-    print(f"Model R^2 Score (Predictive Accuracy): {r2:.2f}")
+    # Dynamically scale tree depth based on how much data we collected overnight
+    # More data = we can safely allow deeper, more complex interactions (5-way or 6-way)
+    optimal_depth = 5
+    if len(X_train) > 1600:
+        optimal_depth = 6
+        
+    print(f"Training 'Ensemble of Specialists' XGBoost Models on {len(X_train)} samples (Auto-Depth: {optimal_depth})...")
+    
+    # Train 3 separate models
+    model_mr = xgb.XGBRegressor(n_estimators=100, max_depth=optimal_depth, learning_rate=0.1, random_state=42)
+    model_tp = xgb.XGBRegressor(n_estimators=100, max_depth=optimal_depth, learning_rate=0.1, random_state=42)
+    model_mb = xgb.XGBRegressor(n_estimators=100, max_depth=optimal_depth, learning_rate=0.1, random_state=42)
 
-    print("\n--- Feature Importance (What actually matters) ---")
-    importances = model.feature_importances_
-    features = X.columns
-    for feat, imp in sorted(zip(features, importances), key=lambda x: x[1], reverse=True):
-        print(f"{feat:25s}: {imp:.4f} ({imp*100:.1f}%)")
+    model_mr.fit(X_train, mr_train)
+    model_tp.fit(X_train, tp_train)
+    model_mb.fit(X_train, mb_train)
 
-    # Generate SHAP Values
-    print("\nGenerating SHAP explanations...")
-    explainer = shap.TreeExplainer(model)
+    # Evaluate the models
+    print(f"Mean Reversion Model R^2 Score: {r2_score(mr_test, model_mr.predict(X_test)):.2f}")
+    print(f"Trend Pullback Model R^2 Score: {r2_score(tp_test, model_tp.predict(X_test)):.2f}")
+    print(f"Momentum Breakout Model R^2 Score: {r2_score(mb_test, model_mb.predict(X_test)):.2f}")
+
+    # Generate SHAP Values for the Overall Portfolio (using MR as the primary proxy for the plot)
+    print("\nGenerating SHAP explanations for Mean Reversion (Primary Alpha Driver)...")
+    explainer = shap.TreeExplainer(model_mr)
     shap_values = explainer.shap_values(X)
 
-    # Plot SHAP Summary
     plt.figure(figsize=(10, 6))
     shap.summary_plot(shap_values, X, show=False)
     plt.tight_layout()
     plt.savefig("shap_summary.png", dpi=300)
     print("-> Saved visual parameter breakdown to 'shap_summary.png'")
     
-    # Optional: Predict 100,000 Random Combinations Instantly
     print("\nSimulating 100,000 virtual backtests via the Neural Surrogate...")
     
-    # Generate random combinations between min and max bounds observed in the dataset
     random_samples = {}
     for col in X.columns:
         low, high = X[col].min(), X[col].max()
-        if X[col].dtype.kind in 'i':  # integer parameter
+        if X[col].dtype.kind in 'i':
             random_samples[col] = np.random.randint(int(low), int(high)+1, 100000)
-        else: # float parameter
+        else:
             random_samples[col] = np.random.uniform(float(low), float(high), 100000)
             
     X_virt = pd.DataFrame(random_samples)
-    y_virt_pred = model.predict(X_virt)
-    X_virt['Predicted_PnL'] = y_virt_pred
+    
+    # Predict individually and sum for Total PnL
+    X_virt['Predicted_MR'] = model_mr.predict(X_virt)
+    X_virt['Predicted_TP'] = model_tp.predict(X_virt)
+    X_virt['Predicted_MB'] = model_mb.predict(X_virt)
+    X_virt['Predicted_PnL'] = X_virt['Predicted_MR'] + X_virt['Predicted_TP'] + X_virt['Predicted_MB']
     
     best_virtual = X_virt.sort_values(by='Predicted_PnL', ascending=False).head(5)
-    print("\nTop 5 AI-Predicted 'Sweet Spots' (Did Optuna miss these?):")
-    print(best_virtual.to_string(index=False))
+    print("\nTop 5 AI-Predicted 'Sweet Spots' (Strategy Breakdown):")
     
-    # Export the top 5 to a JSON file so verify_predictions.py can automatically run them
+    display_cols = ['Predicted_PnL', 'Predicted_MR', 'Predicted_TP', 'Predicted_MB'] + list(X.columns)
+    print(best_virtual[display_cols].to_string(index=False))
+    
     import json
     export_list = []
     for _, row in best_virtual.iterrows():
-        export_list.append(row.to_dict())
+        # Only export the actual parameters plus the Predicted PnL metric
+        clean_row = {k: v for k, v in row.to_dict().items() if not k.startswith("Predicted_") or k == "Predicted_PnL"}
+        export_list.append(clean_row)
         
     with open("surrogate_top_5.json", "w") as f:
         json.dump(export_list, f, indent=4)

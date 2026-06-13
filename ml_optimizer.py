@@ -29,7 +29,7 @@ logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 DATA_CACHE = {}
 OOS_LOOKBACK_DAYS = 30
 
-def load_data(months=3):
+def load_data(months=6):
     configs = [
         ("SPY", "15m"),
         ("QQQ", "15m"),
@@ -42,16 +42,22 @@ def load_data(months=3):
 
 def simulate_trade(df, entry_idx, signal):
     future_df = df.iloc[entry_idx + 1:]
+    
+    # Time Stop: 4 hours for Equities (16 bars), 10 hours for Crypto (10 bars)
+    max_bars = 10 if signal.ticker in ["BTC-USD", "ETH-USD"] else 16
+    
     for i, (_, row) in enumerate(future_df.iterrows()):
-        high = row['High']
-        low = row['Low']
-        
+        # 1. Enforce Time Stop
+        if i >= max_bars:
+            return 'TIME_STOP', row['Close'], i + 1
+            
+        # 2. Check TP / SL
         if signal.direction == 'BUY':
-            if low <= signal.stop_loss: return 'SL', signal.stop_loss, i + 1
-            if high >= signal.take_profit: return 'TP', signal.take_profit, i + 1
+            if row['Low'] <= signal.stop_loss: return 'SL', signal.stop_loss, i + 1
+            if row['High'] >= signal.take_profit: return 'TP', signal.take_profit, i + 1
         elif signal.direction == 'SELL':
-            if high >= signal.stop_loss: return 'SL', signal.stop_loss, i + 1
-            if low <= signal.take_profit: return 'TP', signal.take_profit, i + 1
+            if row['High'] >= signal.stop_loss: return 'SL', signal.stop_loss, i + 1
+            if row['Low'] <= signal.take_profit: return 'TP', signal.take_profit, i + 1
             
     return 'OPEN', future_df["Close"].iloc[-1] if len(future_df) > 0 else signal.entry, len(future_df)
 
@@ -65,7 +71,7 @@ def objective(trial):
     # New missing parameters
     mr_stop_mult = trial.suggest_float("MR_STOP_MULT", 1.0, 4.0, step=0.1)
     tp_stop_mult = trial.suggest_float("TP_STOP_MULT", 1.0, 4.0, step=0.1)
-    tp_pullback_buffer = trial.suggest_float("TP_PULLBACK_BUFFER", 1.000, 1.010, step=0.001)
+    tp_pullback_buffer = trial.suggest_float("TP_PULLBACK_BUFFER", 1.000, 1.050, step=0.001)
     mb_adx_threshold = trial.suggest_float("MB_ADX_THRESHOLD", 15.0, 35.0, step=1.0)
     mr_bb_period = trial.suggest_int("MR_BB_PERIOD", 10, 40)
     mr_rsi_period = trial.suggest_int("MR_RSI_PERIOD", 5, 20)
@@ -112,10 +118,11 @@ def objective(trial):
     
     total_signals = 0
     total_pnl = 0.0
-    months = 3
+    months = 6
     
     # Track individual PnL
     pnl_by_ticker = {"SPY": 0.0, "QQQ": 0.0, "BTC-USD": 0.0}
+    pnl_by_strategy = {"mean_reversion": 0.0, "trend_pullback": 0.0, "momentum_breakout": 0.0}
     
     for ticker, tf, strategy in configs_strat:
         df = DATA_CACHE.get((ticker, tf))
@@ -160,6 +167,7 @@ def objective(trial):
                 
                 total_pnl += trade_pnl
                 pnl_by_ticker[ticker] += trade_pnl
+                pnl_by_strategy[strategy.name] += trade_pnl
                 
     # Penalize low frequency heavily
     if total_signals < 20:
@@ -169,6 +177,9 @@ def objective(trial):
     trial.set_user_attr("SPY_PnL", pnl_by_ticker["SPY"])
     trial.set_user_attr("QQQ_PnL", pnl_by_ticker["QQQ"])
     trial.set_user_attr("BTC_PnL", pnl_by_ticker["BTC-USD"])
+    trial.set_user_attr("MR_PnL", pnl_by_strategy["mean_reversion"])
+    trial.set_user_attr("TP_PnL", pnl_by_strategy["trend_pullback"])
+    trial.set_user_attr("MB_PnL", pnl_by_strategy["momentum_breakout"])
     trial.set_user_attr("Total_Trades", total_signals)
     
     return total_pnl
@@ -204,9 +215,10 @@ def evaluate_oos_params(best_params):
     
     total_signals = 0
     total_pnl = 0.0
-    months = 3
+    months = 6
     
     pnl_by_ticker = {"SPY": 0.0, "QQQ": 0.0, "BTC-USD": 0.0}
+    pnl_by_strategy = {"mean_reversion": 0.0, "trend_pullback": 0.0, "momentum_breakout": 0.0}
     
     for ticker, tf, strategy in configs_strat:
         df = DATA_CACHE.get((ticker, tf))
@@ -246,24 +258,25 @@ def evaluate_oos_params(best_params):
                 
                 total_pnl += trade_pnl
                 pnl_by_ticker[ticker] += trade_pnl
+                pnl_by_strategy[strategy.name] += trade_pnl
                 
     return total_pnl, total_signals, pnl_by_ticker
 
 if __name__ == "__main__":
     print("Loading data for cache...")
-    load_data(months=3)
+    load_data(months=6)
     print("Data loaded. Starting Optuna study...")
     
     # Use SQLite database to permanently save study history so it learns across multiple runs
     # Added timeout=60 to prevent "database is locked" errors when running across multiple terminals
     study = optuna.create_study(
-        study_name="makeshift_trades_v4",
+        study_name="makeshift_trades_6mo",
         storage="sqlite:///optuna_study.db?timeout=60",
         direction="maximize",
         load_if_exists=True
     )
     
-    study.optimize(objective, n_trials=1400)
+    study.optimize(objective, n_trials=5000)
     
     best_trial = study.best_trial
     best_params = best_trial.params

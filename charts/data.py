@@ -122,8 +122,21 @@ def fetch_ohlcv(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.Da
 
     timeframe = _INTERVAL_TO_TIMEFRAME[interval]
 
-    # Calculate start datetime from the human-readable period string.
-    days = _PERIOD_TO_DAYS.get(period, 90)
+    # Parse period string dynamically if possible
+    days = 90
+    if period in _PERIOD_TO_DAYS:
+        days = _PERIOD_TO_DAYS[period]
+    elif period.endswith("mo"):
+        try:
+            days = int(period[:-2]) * 30
+        except ValueError:
+            pass
+    elif period.endswith("y"):
+        try:
+            days = int(period[:-1]) * 365
+        except ValueError:
+            pass
+
     start = datetime.now(timezone.utc) - timedelta(days=days)
 
     symbol = _alpaca_symbol(ticker)

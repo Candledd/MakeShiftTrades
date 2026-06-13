@@ -157,37 +157,37 @@ except ValueError:
 
 # ── Trend Pullback Strategy (SPY, QQQ — 15m) ───────────────────────────────
 try:
-    TP_BB_PERIOD = int(os.getenv("TP_BB_PERIOD", "20"))
+    TP_BB_PERIOD = int(os.getenv("TP_BB_PERIOD", "10"))
 except ValueError:
     raise ValueError("TP_BB_PERIOD must be a valid integer")
 
 try:
-    TP_BB_STD = float(os.getenv("TP_BB_STD", "1.5"))
+    TP_BB_STD = float(os.getenv("TP_BB_STD", "2.2080"))
 except ValueError:
     raise ValueError("TP_BB_STD must be a valid number")
 
 try:
-    TP_STOP_MULT = float(os.getenv("TP_STOP_MULT", "2.5"))
+    TP_STOP_MULT = float(os.getenv("TP_STOP_MULT", "3.9597"))
 except ValueError:
     raise ValueError("TP_STOP_MULT must be a valid number")
 
 try:
-    TP_PULLBACK_BUFFER = float(os.getenv("TP_PULLBACK_BUFFER", "1.002"))
+    TP_PULLBACK_BUFFER = float(os.getenv("TP_PULLBACK_BUFFER", "1.0093"))
 except ValueError:
     raise ValueError("TP_PULLBACK_BUFFER must be a valid number")
 
 try:
-    MR_TP_TARGET_MULT = float(os.getenv("MR_TP_TARGET_MULT", "1.0"))
+    MR_TP_TARGET_MULT = float(os.getenv("MR_TP_TARGET_MULT", "2.3627"))
 except ValueError:
     raise ValueError("MR_TP_TARGET_MULT must be a valid number")
 
 try:
-    MR_MIN_RR = float(os.getenv("MR_MIN_RR", "1.0"))
+    MR_MIN_RR = float(os.getenv("MR_MIN_RR", "1.7599"))
 except ValueError:
     raise ValueError("MR_MIN_RR must be a valid number")
 
 try:
-    TP_MIN_RR = float(os.getenv("TP_MIN_RR", "1.2"))
+    TP_MIN_RR = float(os.getenv("TP_MIN_RR", "2.6153"))
 except ValueError:
     raise ValueError("TP_MIN_RR must be a valid number")
 
@@ -203,43 +203,43 @@ except ValueError:
 
 # ── Mean Reversion Strategy (SPY, QQQ — 15m) ─────────────────────────────────
 try:
-    MR_BB_PERIOD = int(os.getenv("MR_BB_PERIOD", "20"))
+    MR_BB_PERIOD = int(os.getenv("MR_BB_PERIOD", "27"))
 except ValueError:
     raise ValueError("MR_BB_PERIOD must be a valid integer")
 
 try:
-    MR_BB_STD = float(os.getenv("MR_BB_STD", "2.8"))
+    MR_BB_STD = float(os.getenv("MR_BB_STD", "2.6080"))
 except ValueError:
     raise ValueError("MR_BB_STD must be a valid number")
 
 try:
-    MR_STOP_MULT = float(os.getenv("MR_STOP_MULT", "2.5"))
+    MR_STOP_MULT = float(os.getenv("MR_STOP_MULT", "1.8852"))
 except ValueError:
     raise ValueError("MR_STOP_MULT must be a valid number")
 
 try:
-    MR_RSI_PERIOD = int(os.getenv("MR_RSI_PERIOD", "14"))
+    MR_RSI_PERIOD = int(os.getenv("MR_RSI_PERIOD", "10"))
 except ValueError:
     raise ValueError("MR_RSI_PERIOD must be a valid integer")
 
 try:
-    MR_RSI_OVERSOLD = float(os.getenv("MR_RSI_OVERSOLD", "20.0"))
+    MR_RSI_OVERSOLD = float(os.getenv("MR_RSI_OVERSOLD", "39.9400"))
 except ValueError:
     raise ValueError("MR_RSI_OVERSOLD must be a valid number")
 
 try:
-    MR_RSI_OVERBOUGHT = float(os.getenv("MR_RSI_OVERBOUGHT", "68.0"))
+    MR_RSI_OVERBOUGHT = float(os.getenv("MR_RSI_OVERBOUGHT", "78.3060"))
 except ValueError:
     raise ValueError("MR_RSI_OVERBOUGHT must be a valid number")
 
 # ── Momentum Breakout Strategy (BTC — 1h) ────────────────────────────────────
 try:
-    MB_DONCHIAN_PERIOD = int(os.getenv("MB_DONCHIAN_PERIOD", "15"))
+    MB_DONCHIAN_PERIOD = int(os.getenv("MB_DONCHIAN_PERIOD", "31"))
 except ValueError:
     raise ValueError("MB_DONCHIAN_PERIOD must be a valid integer")
 
 try:
-    MB_ADX_THRESHOLD = float(os.getenv("MB_ADX_THRESHOLD", "15.0"))
+    MB_ADX_THRESHOLD = float(os.getenv("MB_ADX_THRESHOLD", "27.9925"))
 except ValueError:
     raise ValueError("MB_ADX_THRESHOLD must be a valid number")
 
@@ -316,7 +316,7 @@ except ValueError:
     raise ValueError("MB_SQUEEZE_KC_MULT must be a valid number")
 
 try:
-    MB_FALSE_BREAKOUT_BARS = int(os.getenv("MB_FALSE_BREAKOUT_BARS", "1"))
+    MB_FALSE_BREAKOUT_BARS = int(os.getenv("MB_FALSE_BREAKOUT_BARS", "3"))
 except ValueError:
     raise ValueError("MB_FALSE_BREAKOUT_BARS must be a valid integer")
 

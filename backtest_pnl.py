@@ -23,9 +23,17 @@ logging.getLogger("charts.data").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 
 def simulate_trade(df, entry_idx, signal):
-    """Simulate future price action to determine outcome (TP, SL, OPEN)."""
+    """Simulate future price action to determine outcome (TP, SL, TIME_STOP, OPEN)."""
     future_df = df.iloc[entry_idx + 1:]
+    
+    # Time Stop: 4 hours for Equities (16 bars @ 15m), 10 hours for Crypto (10 bars @ 1h)
+    max_bars = 10 if signal.ticker in ["BTC-USD", "ETH-USD"] else 16
+    
     for i, (_, row) in enumerate(future_df.iterrows()):
+        # 1. Enforce Time Stop
+        if i >= max_bars:
+            return 'TIME_STOP', row['Close'], i + 1
+            
         high = row['High']
         low = row['Low']
         
@@ -39,7 +47,7 @@ def simulate_trade(df, entry_idx, signal):
     # If the trade is still open at the end of the data, use the last close price
     return 'OPEN', future_df["Close"].iloc[-1] if len(future_df) > 0 else signal.entry, len(future_df)
 
-def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=3):
+def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
     import json
     if os.path.exists("best_params.json"):
         print("-> Loading optimized parameters from best_params.json...")
@@ -47,7 +55,11 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=3):
             best_params = json.load(f)
             for k, v in best_params.items():
                 if hasattr(config, k):
-                    setattr(config, k, v)
+                    orig_val = getattr(config, k)
+                    if isinstance(orig_val, int):
+                        setattr(config, k, int(float(v)))
+                    else:
+                        setattr(config, k, float(v))
     else:
         print("-> Using default parameters from config.py...")
 

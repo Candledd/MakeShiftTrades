@@ -5,7 +5,7 @@ def export_data():
     print("Connecting to Optuna database...")
     try:
         study = optuna.load_study(
-            study_name="makeshift_trades_v4",
+            study_name="makeshift_trades_6mo",
             storage="sqlite:///optuna_study.db"
         )
     except Exception as e:

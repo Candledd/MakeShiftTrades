@@ -25,7 +25,10 @@ def load_data(months=3):
 
 def simulate_trade(df, entry_idx, signal):
     future_df = df.iloc[entry_idx + 1:]
+    max_bars = 10 if signal.ticker in ["BTC-USD", "ETH-USD"] else 16
     for i, (_, row) in enumerate(future_df.iterrows()):
+        if i >= max_bars:
+            return 'TIME_STOP', row['Close']
         if signal.direction == 'BUY':
             if row['Low'] <= signal.stop_loss: return 'SL', signal.stop_loss
             if row['High'] >= signal.take_profit: return 'TP', signal.take_profit
@@ -107,12 +110,22 @@ if __name__ == "__main__":
     print("Loading data for cache... (this takes a few seconds)")
     load_data()
     
-    print(f"\n{'Set':<5} | {'Predicted PnL':<15} | {'Actual PnL':<15} | {'Trades':<10}")
-    print("-" * 55)
+    print(f"\n{'Set':<8} | {'Predicted PnL':<15} | {'Actual PnL':<15} | {'Trades':<10}")
+    print("-" * 58)
+    
+    # 1. Test the current live parameters as a baseline
+    if os.path.exists("best_params.json"):
+        with open("best_params.json", "r") as f:
+            current_params = json.load(f)
+        actual_pnl, trades = test_params(current_params)
+        print(f"{'CURRENT':<8} | {'N/A':<15} | ${actual_pnl:<13.2f}  | {trades:<10}")
+        print("-" * 58)
+        
+    # 2. Test the top 5 AI predictions
     for i, p in enumerate(sets):
         predicted = p.get('Predicted_PnL', 0.0)
         actual_pnl, trades = test_params(p)
-        print(f"#{i+1:<4} | ${predicted:<13.2f}  | ${actual_pnl:<13.2f}  | {trades:<10}")
+        print(f"#{i+1:<7} | ${predicted:<13.2f}  | ${actual_pnl:<13.2f}  | {trades:<10}")
         
     print("\n" + "="*55)
     while True:
