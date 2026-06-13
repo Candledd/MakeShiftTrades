@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import os
 from typing import Optional
 from src.strategies import StrategySignal
 from src.database import get_realized_pnl, get_strategy_expectancy
@@ -163,7 +164,7 @@ class RiskManager:
     # ── Position Sizing ────────────────────────────────────────────────
 
     def calculate_position_size(
-        self, signal: StrategySignal, account_equity: float
+        self, signal: StrategySignal, account_equity: float, signal_regime: Optional[str] = None
     ) -> float:
         """Adaptive Stop-distance-based position sizing with tiered risk,
         volatility shock protection, and gap/slippage buffer.
@@ -206,7 +207,15 @@ class RiskManager:
         adaptive_risk_pct = (
             tier_risk_pct * ai_mult * dd_multiplier * conf_multiplier * shock_mult
         )
-
+        
+        # Fat-Tail Vol-of-Vol Scalar (Injected directly from strategy)
+        if hasattr(signal, 'fat_tail_scalar') and signal.fat_tail_scalar != 1.0:
+            adaptive_risk_pct *= signal.fat_tail_scalar
+            
+        # Hard Regime Cap for Bearish Volatile
+        if signal_regime == "Bearish Volatile":
+            adaptive_risk_pct *= 0.50  # Cap nominal exposure at 50% in panic regimes
+            
         # Enforce absolute 1% maximum hard limit regardless of multipliers
         adaptive_risk_pct = min(adaptive_risk_pct, 0.01)
 
@@ -419,6 +428,35 @@ class RiskManager:
 
         return (True, "OK")
 
+    # ── VIX & Market Stress Gating ─────────────────────────────────────
+
+    def get_vix_level(self) -> float:
+        """Fetch or mock current VIX levels.
+        Ready to plug into a live data feed or broker API.
+        """
+        try:
+            return float(os.getenv("MOCK_VIX_LEVEL", "20.0"))
+        except ValueError:
+            return 20.0
+
+    def check_trade_viability(self, signal: StrategySignal) -> tuple[bool, str]:
+        """Perform additional macro/market-stress viability checks.
+        
+        Specifically, rejects mean reversion trades if VIX is above MAX_VIX_THRESHOLD,
+        as high VIX environments represent extreme market stress where mean reversion
+        strategies tend to suffer from tail correlation blowups.
+        """
+        if signal.strategy_name == "mean_reversion":
+            vix = self.get_vix_level()
+            max_vix = getattr(_cfg, 'MAX_VIX_THRESHOLD', 30.0)
+            if vix > max_vix:
+                return (
+                    False,
+                    f"VIX Circuit Breaker: Current VIX {vix:.2f} exceeds "
+                    f"MAX_VIX_THRESHOLD {max_vix:.2f} for mean reversion"
+                )
+        return (True, "OK")
+
     # ── Signal Validation ──────────────────────────────────────────────
 
     def validate_signal(
@@ -432,6 +470,11 @@ class RiskManager:
 
         Returns ``(True, "OK")`` or ``(False, reason)``.
         """
+        # 0. Viability check (VIX circuit breaker)
+        viable, viability_reason = self.check_trade_viability(signal)
+        if not viable:
+            return (False, viability_reason)
+
         # 1. Entry price
         if signal.entry <= 0:
             return (False, "Invalid entry price")
@@ -543,7 +586,7 @@ class RiskManager:
             return (False, 0.0, reason)
 
         # 2. Position sizing (calculated early for portfolio heat check)
-        notional = self.calculate_position_size(signal, account_equity)
+        notional = self.calculate_position_size(signal, account_equity, signal_regime=signal_regime)
         if notional <= 0:
             self.logger.info(
                 "Signal rejected: %s %s — Position size is zero",

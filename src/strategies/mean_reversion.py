@@ -56,7 +56,7 @@ class MeanReversionStrategy(BaseStrategy):
         direction: str,
         atr: float,
     ) -> float:
-        stop_distance = 2.5 * atr
+        stop_distance = config.MR_STOP_MULT * atr
         if direction == "BUY":
             return entry - stop_distance
         else:
@@ -172,14 +172,18 @@ class MeanReversionStrategy(BaseStrategy):
 
         stop_loss = self.compute_stop_loss(entry, direction, atr=atr_val)
 
-        # Take-profit: revert halfway to the SMA20 (mid-band) for higher win-rate scalping
-        take_profit = entry + (current_sma20 - entry) * 0.5
+        # Take-profit: dynamic target based on distance to SMA
+        take_profit = entry + (current_sma20 - entry) * getattr(config, 'MR_TP_TARGET_MULT', 1.0)
 
-        # R/R gate: TP must be at least 0.8x as far as the stop
+        # R/R gate: TP must meet the minimum R/R ratio to survive slippage
         tp_distance = abs(take_profit - entry)
         sl_distance = abs(entry - stop_loss)
-        # Relaxed to 0.1 for scalps since we halved the TP distance
-        if tp_distance < sl_distance * 0.1:
+        
+        # Ensure target is logically in front of entry
+        if (direction == "BUY" and take_profit <= entry) or (direction == "SELL" and take_profit >= entry):
+            return None
+            
+        if tp_distance < sl_distance * getattr(config, 'MR_MIN_RR', 1.0):
             logger.debug(
                 "%s %s: bad R/R (entry=%.2f, SL=%.2f, TP=%.2f)",
                 self.name, ticker, entry, stop_loss, take_profit,

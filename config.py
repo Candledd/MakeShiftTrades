@@ -69,6 +69,11 @@ try:
 except ValueError:
     raise ValueError("MIN_EXPECTANCY_SAMPLES must be a valid integer")
 
+try:
+    MAX_VIX_THRESHOLD = float(os.getenv("MAX_VIX_THRESHOLD", "30.0"))
+except ValueError:
+    raise ValueError("MAX_VIX_THRESHOLD must be a valid number")
+
 # ── Tiered Risk Per Asset Class ──────────────────────────────────────────────
 # These override MAX_RISK_PCT when a ticker matches the corresponding asset set.
 try:
@@ -100,6 +105,11 @@ try:
     GAP_SLIPPAGE_BUFFER_PCT = float(os.getenv("GAP_SLIPPAGE_BUFFER_PCT", "0.001"))
 except ValueError:
     raise ValueError("GAP_SLIPPAGE_BUFFER_PCT must be a valid number")
+
+try:
+    BACKTEST_SLIPPAGE_FRICTION_PCT = float(os.getenv("BACKTEST_SLIPPAGE_FRICTION_PCT", "0.0005"))
+except ValueError:
+    raise ValueError("BACKTEST_SLIPPAGE_FRICTION_PCT must be a valid number")
 
 # ── Volatility Shock Adjustment ──────────────────────────────────────────────
 # When ATR/price exceeds VOLATILITY_SHOCK_ATR_PCT, position size is multiplied
@@ -152,9 +162,34 @@ except ValueError:
     raise ValueError("TP_BB_PERIOD must be a valid integer")
 
 try:
-    TP_BB_STD = float(os.getenv("TP_BB_STD", "2.0"))
+    TP_BB_STD = float(os.getenv("TP_BB_STD", "1.5"))
 except ValueError:
     raise ValueError("TP_BB_STD must be a valid number")
+
+try:
+    TP_STOP_MULT = float(os.getenv("TP_STOP_MULT", "2.5"))
+except ValueError:
+    raise ValueError("TP_STOP_MULT must be a valid number")
+
+try:
+    TP_PULLBACK_BUFFER = float(os.getenv("TP_PULLBACK_BUFFER", "1.002"))
+except ValueError:
+    raise ValueError("TP_PULLBACK_BUFFER must be a valid number")
+
+try:
+    MR_TP_TARGET_MULT = float(os.getenv("MR_TP_TARGET_MULT", "1.0"))
+except ValueError:
+    raise ValueError("MR_TP_TARGET_MULT must be a valid number")
+
+try:
+    MR_MIN_RR = float(os.getenv("MR_MIN_RR", "1.0"))
+except ValueError:
+    raise ValueError("MR_MIN_RR must be a valid number")
+
+try:
+    TP_MIN_RR = float(os.getenv("TP_MIN_RR", "1.2"))
+except ValueError:
+    raise ValueError("TP_MIN_RR must be a valid number")
 
 try:
     TP_RSI_PERIOD = int(os.getenv("TP_RSI_PERIOD", "14"))
@@ -173,9 +208,14 @@ except ValueError:
     raise ValueError("MR_BB_PERIOD must be a valid integer")
 
 try:
-    MR_BB_STD = float(os.getenv("MR_BB_STD", "2.0"))
+    MR_BB_STD = float(os.getenv("MR_BB_STD", "2.8"))
 except ValueError:
     raise ValueError("MR_BB_STD must be a valid number")
+
+try:
+    MR_STOP_MULT = float(os.getenv("MR_STOP_MULT", "2.5"))
+except ValueError:
+    raise ValueError("MR_STOP_MULT must be a valid number")
 
 try:
     MR_RSI_PERIOD = int(os.getenv("MR_RSI_PERIOD", "14"))
@@ -183,18 +223,18 @@ except ValueError:
     raise ValueError("MR_RSI_PERIOD must be a valid integer")
 
 try:
-    MR_RSI_OVERSOLD = float(os.getenv("MR_RSI_OVERSOLD", "20"))
+    MR_RSI_OVERSOLD = float(os.getenv("MR_RSI_OVERSOLD", "20.0"))
 except ValueError:
     raise ValueError("MR_RSI_OVERSOLD must be a valid number")
 
 try:
-    MR_RSI_OVERBOUGHT = float(os.getenv("MR_RSI_OVERBOUGHT", "80"))
+    MR_RSI_OVERBOUGHT = float(os.getenv("MR_RSI_OVERBOUGHT", "68.0"))
 except ValueError:
     raise ValueError("MR_RSI_OVERBOUGHT must be a valid number")
 
 # ── Momentum Breakout Strategy (BTC — 1h) ────────────────────────────────────
 try:
-    MB_DONCHIAN_PERIOD = int(os.getenv("MB_DONCHIAN_PERIOD", "2"))
+    MB_DONCHIAN_PERIOD = int(os.getenv("MB_DONCHIAN_PERIOD", "15"))
 except ValueError:
     raise ValueError("MB_DONCHIAN_PERIOD must be a valid integer")
 
@@ -453,6 +493,7 @@ for _name, _val, _label in [
     ("RISK_TIER_COMMODITY_PCT", RISK_TIER_COMMODITY_PCT, "> 0"),
     ("SPREAD_ATR_CAP_PCT", SPREAD_ATR_CAP_PCT, "> 0"),
     ("GAP_SLIPPAGE_BUFFER_PCT", GAP_SLIPPAGE_BUFFER_PCT, ">= 0"),
+    ("BACKTEST_SLIPPAGE_FRICTION_PCT", BACKTEST_SLIPPAGE_FRICTION_PCT, ">= 0"),
     ("VOLATILITY_SHOCK_ATR_PCT", VOLATILITY_SHOCK_ATR_PCT, "> 0"),
     ("VOLATILITY_SHOCK_REDUCTION", VOLATILITY_SHOCK_REDUCTION, "> 0"),
     ("TP_BB_PERIOD", TP_BB_PERIOD, ">= 2"),
@@ -481,6 +522,7 @@ for _name, _val, _label in [
     ("AI_RISK_MULTIPLIER_EQUITY", AI_RISK_MULTIPLIER_EQUITY, "> 0"),
     ("AI_RISK_MULTIPLIER_CRYPTO", AI_RISK_MULTIPLIER_CRYPTO, "> 0"),
     ("AI_RISK_MULTIPLIER_COMMODITY", AI_RISK_MULTIPLIER_COMMODITY, "> 0"),
+    ("MAX_VIX_THRESHOLD", MAX_VIX_THRESHOLD, "> 0"),
 ]:
     op, limit_str = _label.split(' ')
     limit = float(limit_str)

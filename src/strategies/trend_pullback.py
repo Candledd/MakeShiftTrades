@@ -47,7 +47,7 @@ class TrendPullbackStrategy(BaseStrategy):
         direction: str,
         atr: float,
     ) -> float:
-        stop_distance = 2.5 * atr
+        stop_distance = config.TP_STOP_MULT * atr
         if direction == "BUY":
             return entry - stop_distance
         else:
@@ -131,11 +131,11 @@ class TrendPullbackStrategy(BaseStrategy):
         # a daily uptrend.
         # ----------------------------------------------------------------
 
-        at_lower_band = current_close <= current_lower * 1.002
-        rsi_weak_not_collapsing = 25.0 <= current_rsi <= 65.0
-        reclaiming_band = True # skip this tight check
-        volume_confirm = True # skip volume restriction
-
+        at_lower_band = current_close <= current_lower * config.TP_PULLBACK_BUFFER
+        rsi_weak_not_collapsing = 15.0 <= current_rsi <= 65.0
+        reclaiming_band = current_close > current_lower
+        volume_confirm = vol_ratio > 0.5
+        
         if not (at_lower_band and rsi_weak_not_collapsing and reclaiming_band and volume_confirm):
             return None
 
@@ -148,11 +148,15 @@ class TrendPullbackStrategy(BaseStrategy):
 
         # Take-profit: the higher of VWAP and SMA20
         take_profit = max(current_vwap, current_sma20)
+        
+        if take_profit <= entry:
+            logger.debug("%s %s: inverted TP/Entry (TP=%.2f <= Entry=%.2f)", self.name, ticker, take_profit, entry)
+            return None
 
-        # R/R gate: require at least 1.0:1
-        tp_distance = abs(take_profit - entry)
-        sl_distance = abs(entry - stop_loss)
-        if tp_distance < sl_distance * 0.1:
+        # R/R gate: require dynamic minimum R/R to survive slippage
+        tp_distance = take_profit - entry
+        sl_distance = entry - stop_loss
+        if tp_distance < sl_distance * getattr(config, 'TP_MIN_RR', 1.2):
             logger.debug(
                 "%s %s: poor R/R (entry=%.2f, SL=%.2f, TP=%.2f)",
                 self.name, ticker, entry, stop_loss, take_profit,

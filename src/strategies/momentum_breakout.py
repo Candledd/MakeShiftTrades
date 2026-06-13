@@ -144,7 +144,19 @@ class MomentumBreakoutStrategy(BaseStrategy):
             axis=1,
         ).max(axis=1)
         atr_series = tr.ewm(span=14, adjust=False).mean()
-        atr_val = float(atr_series.iloc[-1])
+        atr_3_series = tr.ewm(span=3, adjust=False).mean()
+        
+        atr_14_val = float(atr_series.iloc[-1])
+        atr_3_val = float(atr_3_series.iloc[-1])
+        
+        # Dual-ATR Sizing: Catch sudden intraday vol expansions immediately
+        atr_val = max(atr_14_val, atr_3_val)
+        
+        # Vol-of-Vol Scalar (Standard deviation of last 10 ATR readings)
+        atr_10_std = float(atr_series.iloc[-10:].std())
+        fat_tail_scalar = 1.0
+        if atr_10_std > (atr_14_val * 0.15):
+            fat_tail_scalar = 0.6  # Midpoint of 0.5-0.7x
 
         # Volume MA(20)
         volume_ma = volume.rolling(20).mean().replace(0, np.nan)
@@ -340,5 +352,5 @@ class MomentumBreakoutStrategy(BaseStrategy):
             reason=reason,
             atr=current_atr,
             timestamp=datetime.now(timezone.utc),
-            order_type="LIMIT",
+            fat_tail_scalar=fat_tail_scalar,
         )

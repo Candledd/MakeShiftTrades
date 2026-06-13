@@ -13,6 +13,7 @@ import config
 
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum_breakout import MomentumBreakoutStrategy
+from src.strategies.trend_pullback import TrendPullbackStrategy
 from charts.data import fetch_ohlcv
 
 # Suppress debug logging during backtest to keep console clean
@@ -38,7 +39,18 @@ def simulate_trade(df, entry_idx, signal):
     # If the trade is still open at the end of the data, use the last close price
     return 'OPEN', future_df["Close"].iloc[-1] if len(future_df) > 0 else signal.entry, len(future_df)
 
-def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=1):
+def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=3):
+    import json
+    if os.path.exists("best_params.json"):
+        print("-> Loading optimized parameters from best_params.json...")
+        with open("best_params.json", "r") as f:
+            best_params = json.load(f)
+            for k, v in best_params.items():
+                if hasattr(config, k):
+                    setattr(config, k, v)
+    else:
+        print("-> Using default parameters from config.py...")
+
     print("=" * 70)
     print(f"{months}-Month Scalp Backtest (Simulated PnL)")
     print(f"Assuming ${account_size:,.0f} starting capital | {risk_pct}% Risk per Trade (${account_size * (risk_pct/100):.2f})")
@@ -47,6 +59,8 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=1):
     configs = [
         ("SPY", "15m", MeanReversionStrategy()),
         ("QQQ", "15m", MeanReversionStrategy()),
+        ("SPY", "15m", TrendPullbackStrategy()),
+        ("QQQ", "15m", TrendPullbackStrategy()),
         ("BTC-USD", "1h", MomentumBreakoutStrategy())
     ]
     
@@ -74,11 +88,11 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=1):
         ticker_losses = 0
         ticker_pnl = 0.0
         
+        # Reset internal cooldowns ONCE per ticker
+        strategy._last_signal_time = {} 
+        
         for i in range(test_start_idx, len(df) - 1):
             window_df = df.iloc[:i+1]
-            
-            # Reset internal cooldowns to allow testing all valid setups over time
-            strategy._last_signal_time = {} 
             
             signal = strategy.analyze(window_df, ticker)
             if signal:
@@ -91,10 +105,17 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=1):
                 
                 qty = RISK_DOLLARS / risk_per_share
                 
+                # Prevent infinite margin leverage (Max 1x account size per trade for backtest realism)
+                max_qty = account_size / signal.entry
+                qty = min(qty, max_qty)
+                
                 if signal.direction == 'BUY':
                     trade_pnl = (exit_price - signal.entry) * qty
                 else:
                     trade_pnl = (signal.entry - exit_price) * qty
+                
+                # Subtract transaction cost
+                trade_pnl -= (signal.entry * qty * (config.BACKTEST_SLIPPAGE_FRICTION_PCT / 2.0)) + (exit_price * qty * (config.BACKTEST_SLIPPAGE_FRICTION_PCT / 2.0))
                 
                 ticker_pnl += trade_pnl
                 

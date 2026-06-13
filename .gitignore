@@ -53,3 +53,4 @@ overnight_equity_tracker.jsonl
 *.db
 makeshift.db-wal
 makeshift.db-shm
+optuna_trials_data.csv
