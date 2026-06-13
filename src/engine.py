@@ -79,6 +79,18 @@ class TradingEngine:
         # Macro Kill Switch
         self.macro_filter = MacroFilter()
 
+        # Warn if macro filter is enabled but the calendar has no future events
+        if config.MACRO_FILTER_ENABLED:
+            all_events = MacroFilter.load_events()
+            now_utc = datetime.now(timezone.utc)
+            future_events = [e for e in all_events if e["event_time_utc"] > now_utc]
+            if not future_events:
+                logger.warning("=" * 60)
+                logger.warning("MACRO FILTER WARNING: No future macro events found in calendar!")
+                logger.warning("The kill switch will NOT block any entries until events are added.")
+                logger.warning("Check macro_calendar.json or add upcoming event entries.")
+                logger.warning("=" * 60)
+
         # Strategy instances
         self.mean_rev = MeanReversionStrategy()
         self.momentum = MomentumBreakoutStrategy()
@@ -538,7 +550,7 @@ class TradingEngine:
                 )
             expected_ev = ev_r
 
-            regime_fit = self._calc_regime_fit_score(regime, signal.strategy_name, signal.direction, alpaca_ticker)
+            regime_fit = self._calc_regime_fit_score(regime, signal.strategy_name, signal.direction)
 
             atr_pct = (signal.atr / signal.entry) if signal.atr > 0 and signal.entry > 0 else 0.0
             liquidity_score = max(0.0, 1.0 - atr_pct / LIQUIDITY_ATR_CEILING)
@@ -565,37 +577,8 @@ class TradingEngine:
                 ml_agreement, slippage_penalty, composite_score,
             )
 
-            # 4. Assign to the appropriate bucket using the resolved ticker
-            bucket = BUCKET_MAP.get(alpaca_ticker, "general")
-            scored_signals[bucket].append((composite_score, signal, df))
-
-        # 5. Select the top signal per bucket
-        winners: list[tuple[StrategySignal, Optional[pd.DataFrame]]] = []
-        for bucket_name, bucket_list in scored_signals.items():
-            if not bucket_list:
-                continue
-
-            bucket_list.sort(key=lambda x: x[0], reverse=True)
-            best_score, best_signal, best_df = bucket_list[0]
-
-            logger.info(
-                "[RANK-SELECT] [%s] Selected %s %s %s (score=%+.4f) over %d competing signal(s) in bucket",
-                bucket_name,
-                best_signal.direction, best_signal.ticker, best_signal.strategy_name,
-                best_score, len(bucket_list) - 1,
-            )
-
-            winners.append((best_signal, best_df))
-
-        if not winners:
-            return []
-
-        return winners
-
-    # ──────────────────────────────────────────────────────────────────────
-
     @staticmethod
-    def _calc_regime_fit_score(regime: str, strategy_name: str, direction: str, ticker: str) -> float:
+    def _calc_regime_fit_score(regime: str, strategy_name: str, direction: str) -> float:
         """Return a 0–1 score indicating how well *strategy* fits *regime*.
 
         Regime labels come from the AI Tuner and are one of:
@@ -606,6 +589,8 @@ class TradingEngine:
         the scoring to favor bearish regimes.
         """
         regime_lower = regime.lower().strip()
+
+        fit_map = {}
 
         if strategy_name == "mean_reversion":
             # Mean reversion thrives in range-bound / choppy markets
@@ -645,6 +630,8 @@ class TradingEngine:
                         "bearish chop": 0.3,
                         "bearish volatile": 0.1,
                     }
+
+        return fit_map.get(regime_lower, 0.5)
 
     def _execute_signal(self, signal: StrategySignal, df: pd.DataFrame = None) -> None:
         """Run approval pipeline and — if approved — place the order.

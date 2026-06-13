@@ -31,7 +31,7 @@ class MacroFilter:
     _calendar_path: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "macro_calendar.json")
 
     @classmethod
-    def _load_events(cls) -> List[Dict[str, Any]]:
+    def load_events(cls) -> List[Dict[str, Any]]:
         """Load events from macro_calendar.json, caching by mtime for hot-reloading.
 
         If the file has been modified since the last load (or this is the first
@@ -59,7 +59,7 @@ class MacroFilter:
                         dt = datetime.fromisoformat(event["time_utc"].replace("Z", "+00:00"))
                         event_time_utc = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
                         parsed.append({
-                            "event_name": event["name"],
+                            "event_name": event.get("name") or event.get("event_name", "UNKNOWN"),
                             "event_time_utc": event_time_utc,
                             "affected_assets": event.get("affected_assets", []),
                             "pre_window_td": timedelta(minutes=int(event["pre_window"])),
@@ -104,7 +104,7 @@ class MacroFilter:
             raise TypeError("dt_or_ts must be a float timestamp or a datetime object")
 
         active_events = []
-        for event in cls._load_events():
+        for event in cls.load_events():
             event_time = event["event_time_utc"]
             pre_win_td = event["pre_window_td"]
             post_win_td = event["post_window_td"]
