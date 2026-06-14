@@ -322,12 +322,16 @@ def objective(trial):
         max_trade_concentration = max_trade_pnl / total_pnl if total_pnl > 0 else 1.0
         parameter_instability_penalty = ticker_concentration + max_trade_concentration
         
+        # Classic Quant Institute profile: We EXPECT a 30-40% winrate with massive runners.
+        # Stop penalizing drawdown so aggressively, and heavily reward sheer R-multiple generation.
+        # Add a small bonus for taking more trades (Law of Large Numbers).
+        
         score = (
-            net_R
-            - 2.0 * max_drawdown_R
-            + 0.5 * profit_factor_bonus
-            - 0.5 * abs(strategy_concentration)
-            - 0.25 * parameter_instability_penalty
+            (net_R * 1.5)                            # Massively prioritize pure alpha/profit
+            - (0.5 * max_drawdown_R)                 # Accept drawdowns as the cost of doing business
+            + (0.1 * total_signals)                  # Reward the bot for taking more shots (active trading)
+            - 0.5 * abs(strategy_concentration)      # Keep diversification penalty
+            - 0.25 * parameter_instability_penalty   # Keep single-trade concentration penalty
         )
 
         # ── Commodity validation: GLD and PDBC ─────────────────────────

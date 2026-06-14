@@ -25,7 +25,7 @@ logging.getLogger("src.strategies").setLevel(logging.CRITICAL)
 logging.getLogger("charts.data").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 
-def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
+def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=1):
     import json
     if os.path.exists("best_params.json"):
         print("-> Loading optimized parameters from best_params.json...")
