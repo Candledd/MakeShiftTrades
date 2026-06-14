@@ -1231,7 +1231,7 @@ class TradingEngine:
                 time_stop_hours = 0.25
                 
             hours_open = (time.time() - state['open_ts']) / 3600.0
-            if hours_open > time_stop_hours and (unrealized_pl / (market_value + 1e-9)) < 0.005:
+            if hours_open > time_stop_hours:
                 logger.info(
                     "Closing %s due to time stop (%.1f hours)",
                     sym, time_stop_hours,

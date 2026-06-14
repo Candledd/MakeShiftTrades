@@ -28,6 +28,7 @@ class StrategySignal:
     atr: float  # ATR(14) at signal time
     timestamp: datetime
     sizing_multiplier: float = 1.0
+    vol_multiplier: float = 1.0
     order_type: str = "MARKET"
     fat_tail_scalar: float = 1.0
     time_stop_bars: int = 10

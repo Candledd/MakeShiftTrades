@@ -231,6 +231,27 @@ try:
 except ValueError:
     raise ValueError("TP_VOL_SPIKE_MULT must be a valid number")
 
+# ── Volume Profile (Numba POC / Value Area) ──────────────────────────────────
+try:
+    VP_WINDOW = int(os.getenv("VP_WINDOW", "100"))
+except ValueError:
+    raise ValueError("VP_WINDOW must be a valid integer")
+
+try:
+    VP_NUM_BINS = int(os.getenv("VP_NUM_BINS", "24"))
+except ValueError:
+    raise ValueError("VP_NUM_BINS must be a valid integer")
+
+try:
+    VP_VA_THRESHOLD = float(os.getenv("VP_VA_THRESHOLD", "0.70"))
+except ValueError:
+    raise ValueError("VP_VA_THRESHOLD must be a valid number")
+
+try:
+    VP_POC_DISTANCE_THRESHOLD = float(os.getenv("VP_POC_DISTANCE_THRESHOLD", "0.003"))
+except ValueError:
+    raise ValueError("VP_POC_DISTANCE_THRESHOLD must be a valid number")
+
 # ── Mean Reversion Strategy (SPY, QQQ — 15m) ─────────────────────────────────
 try:
     MR_BB_PERIOD = int(os.getenv("MR_BB_PERIOD", "27"))
@@ -415,6 +436,26 @@ try:
     MB_RSI_PERIOD = int(os.getenv("MB_RSI_PERIOD", "14"))
 except ValueError:
     raise ValueError("MB_RSI_PERIOD must be a valid integer")
+
+try:
+    MB_BB_PERIOD = int(os.getenv("MB_BB_PERIOD", "20"))
+except ValueError:
+    raise ValueError("MB_BB_PERIOD must be a valid integer")
+
+try:
+    MB_RVOL_LOOKBACK = int(os.getenv("MB_RVOL_LOOKBACK", "21"))
+except ValueError:
+    raise ValueError("MB_RVOL_LOOKBACK must be a valid integer")
+
+try:
+    MB_HIGH_VOL_RATIO = float(os.getenv("MB_HIGH_VOL_RATIO", "2.5"))
+except ValueError:
+    raise ValueError("MB_HIGH_VOL_RATIO must be a valid number")
+
+try:
+    MB_MED_VOL_RATIO = float(os.getenv("MB_MED_VOL_RATIO", "2.0"))
+except ValueError:
+    raise ValueError("MB_MED_VOL_RATIO must be a valid number")
 
 # ── Momentum Breakout — Compression / Expansion (two-stage model) ──────────────
 try:
@@ -653,6 +694,10 @@ for _name, _val, _label in [
     ("MB_SQUEEZE_BB_MULT", MB_SQUEEZE_BB_MULT, "> 0"),
     ("MB_SQUEEZE_KC_MULT", MB_SQUEEZE_KC_MULT, "> 0"),
     ("MB_MIN_VOLUME_RATIO", MB_MIN_VOLUME_RATIO, "> 0"),
+    ("MB_BB_PERIOD", MB_BB_PERIOD, ">= 2"),
+    ("MB_RVOL_LOOKBACK", MB_RVOL_LOOKBACK, ">= 5"),
+    ("MB_HIGH_VOL_RATIO", MB_HIGH_VOL_RATIO, "> 0"),
+    ("MB_MED_VOL_RATIO", MB_MED_VOL_RATIO, "> 0"),
     ("MB_ATR_PERCENTILE_LOOKBACK", MB_ATR_PERCENTILE_LOOKBACK, ">= 10"),
     ("MB_COMPRESSION_THRESHOLD", MB_COMPRESSION_THRESHOLD, ">= 0"),
     ("MB_EXPANSION_VOLUME_RATIO", MB_EXPANSION_VOLUME_RATIO, "> 0"),
@@ -678,6 +723,11 @@ for _name, _val, _label in [
     ("ML_MILD_DISAGREEMENT_SCALING", ML_MILD_DISAGREEMENT_SCALING, "> 0"),
     ("ML_AGREEMENT_THRESHOLD", ML_AGREEMENT_THRESHOLD, "> 0"),
     ("ML_AGREEMENT_BOOST", ML_AGREEMENT_BOOST, "> 0"),
+    ("VP_WINDOW", VP_WINDOW, ">= 10"),
+    ("VP_NUM_BINS", VP_NUM_BINS, ">= 4"),
+    ("VP_VA_THRESHOLD", VP_VA_THRESHOLD, "> 0"),
+    ("VP_VA_THRESHOLD", VP_VA_THRESHOLD, "< 1"),
+    ("VP_POC_DISTANCE_THRESHOLD", VP_POC_DISTANCE_THRESHOLD, "> 0"),
 ]:
     op, limit_str = _label.split(' ')
     limit = float(limit_str)

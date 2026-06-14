@@ -88,8 +88,8 @@ class MomentumBreakoutStrategy(BaseStrategy):
         atr_score = 100.0 - atr_pctile  # invert
 
         # 2. Bollinger Bandwidth percentile ── narrow width = high compression
-        bb_sma = close.rolling(20).mean()
-        bb_std = close.rolling(20).std(ddof=0)
+        bb_sma = close.rolling(config.MB_BB_PERIOD).mean()
+        bb_std = close.rolling(config.MB_BB_PERIOD).std(ddof=0)
         bbw = 2.0 * bb_std / bb_sma.replace(0, np.nan)
         bbw_pctile = self._percentile_rank(bbw, lookback)
         bbw_score = 100.0 - bbw_pctile
@@ -100,7 +100,7 @@ class MomentumBreakoutStrategy(BaseStrategy):
         range_score = 100.0 - range_pctile
 
         # 4. Volume stability ── low relative volume suggests coiling
-        vol_ma = volume.rolling(20).mean().replace(0, np.nan)
+        vol_ma = volume.rolling(config.MB_BB_PERIOD).mean().replace(0, np.nan)
         vol_ratio = volume / vol_ma
         current_vr = float(vol_ratio.iloc[-1])
         if pd.notna(current_vr):
@@ -115,6 +115,81 @@ class MomentumBreakoutStrategy(BaseStrategy):
     # ────────────────────────────────────────────────────────────────────────
     # Main analysis entry-point
     # ────────────────────────────────────────────────────────────────────────
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Time-of-Day RVOL (Relative Volume) — institutional cumulative baseline
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _compute_tod_rvol(self, df: pd.DataFrame) -> float:
+        """Compute Time-of-Day Relative Volume (RVOL) ratio.
+
+        For the current (last) bar, this method calculates:
+
+            RVOL = CumulativeVolumeToday(Open → CurrentTime)
+                   / AvgCumulativeVolume(Open → CurrentTime) over N-day lookback
+
+        By comparing cumulative volume at the *exact same time-of-day* across
+        the lookback, this normalises out intraday volume seasonality (the
+        morning rush, lunch lull, afternoon ramp) so breakouts are confirmed
+        only when volume is genuinely elevated for that specific time block.
+
+        Returns
+        -------
+        float
+            RVOL ratio (>1.0 means volume is above average for this
+            time-of-day).  Falls back to 1.0 (neutral) when insufficient
+            history is available.
+        """
+        lookback_days = config.MB_RVOL_LOOKBACK
+
+        # Work on a copy to avoid mutating the caller's DataFrame
+        df = df.copy()
+
+        # ── Ensure a DatetimeIndex ──────────────────────────────────────
+        idx = df.index
+        if not isinstance(idx, pd.DatetimeIndex):
+            idx = pd.to_datetime(idx)
+        df = df.set_index(idx)
+
+        # ── Intraday cumulative volume per bar ──────────────────────────
+        df["_date"] = df.index.date
+        df["_time"] = df.index.time
+        df["_cum_vol"] = df.groupby("_date")["Volume"].cumsum()
+
+        # ── Vectorised pivot: dates × times ─────────────────────────────
+        # Build a 2-D table (dates as rows, times as columns) so that the
+        # rolling average operates across entire columns at once, avoiding
+        # the slow groupby().transform(lambda ...) anti-pattern.
+
+        # Sort only if not already monotonic to avoid redundant copies
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+
+        pivot = df.pivot_table(
+            index="_date", columns="_time", values="_cum_vol", aggfunc="first",
+        )
+
+        # Rolling average of the previous N days at each TOD bucket.
+        # shift(1) excludes today's own value from the average.
+        tod_avg_pivot = pivot.shift(1).rolling(
+            window=lookback_days, min_periods=5,
+        ).mean()
+
+        # Stack back to a Series aligned with the original rows
+        tod_avg = (
+            tod_avg_pivot
+            .stack()
+            .reindex(pd.MultiIndex.from_frame(df[["_date", "_time"]]))
+        )
+        tod_avg.index = df.index  # restore original DatetimeIndex
+
+        current_cum_vol = float(df["_cum_vol"].iloc[-1])
+        avg_cum_vol = float(tod_avg.iloc[-1])
+
+        if pd.isna(avg_cum_vol) or avg_cum_vol <= 0.0:
+            return 1.0  # neutral fallback — insufficient history
+
+        return current_cum_vol / avg_cum_vol
 
     def analyze(self, df: pd.DataFrame, ticker: str) -> Optional[StrategySignal]:
         # ── Data quality guard ──────────────────────────────────────────
@@ -158,8 +233,8 @@ class MomentumBreakoutStrategy(BaseStrategy):
         if atr_10_std > (atr_14_val * 0.15):
             fat_tail_scalar = 0.6  # Midpoint of 0.5-0.7x
 
-        # Volume MA(20)
-        volume_ma = volume.rolling(20).mean().replace(0, np.nan)
+        # Time-of-Day RVOL replaces the simple 20-bar rolling volume average.
+        # Computed inside _compute_tod_rvol().
 
         # ────────────────────────────────────────────────────────────────
         # Stage 1: Compression detection
@@ -179,7 +254,7 @@ class MomentumBreakoutStrategy(BaseStrategy):
         current_upper = float(upper_channel.iloc[-1])
         current_lower = float(lower_channel.iloc[-1])
         current_atr = atr_val
-        current_volume_ratio = float((volume / volume_ma).iloc[-1])
+        current_volume_ratio = self._compute_tod_rvol(df)
 
         if any(
             pd.isna(v) or v == 0.0
@@ -275,9 +350,9 @@ class MomentumBreakoutStrategy(BaseStrategy):
             confidence += 10
 
         # Volume well above the expansion threshold
-        if current_volume_ratio > 2.5:
+        if current_volume_ratio > config.MB_HIGH_VOL_RATIO:
             confidence += 15
-        elif current_volume_ratio > 2.0:
+        elif current_volume_ratio > config.MB_MED_VOL_RATIO:
             confidence += 10
 
         # Clean break — price more than 0.5 % beyond the channel

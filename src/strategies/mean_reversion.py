@@ -31,6 +31,83 @@ logger = logging.getLogger(__name__)
 
 import config
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Ornstein-Uhlenbeck Half-Life estimation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _estimate_ou_half_life(
+    prices: np.ndarray,
+    lookback: int = 80,
+) -> Optional[float]:
+    """Estimate the OU mean-reversion half-life via AR(1) regression.
+
+    Fits  ΔS_t = α + β·S_{t-1} + ε_t  using ``numpy.polyfit`` (deg=1).
+
+    The discrete-time half-life is computed as:
+
+        H = -ln(2) / ln(1 + β)
+
+    where *β* is the slope (theta) of the regression.  This formula is
+    exact for an AR(1) process, unlike the continuous approximation
+    ln(2)/|θ|.
+
+    Parameters
+    ----------
+    prices : np.ndarray
+        Detrended price series (e.g. price - SMA) with at least
+        *lookback* + 2 observations.
+    lookback : int
+        How many price-difference observations to regress over (default 80).
+
+    Returns
+    -------
+    float or None
+        Half-life in bars, or None if the estimate is not mathematically
+        valid (β ≥ 0 — not mean-reverting; β ≤ -1 — non-stationary /
+        oscillating explosive; or half-life outside the 5–50 bar sanity
+        window).
+    """
+    if len(prices) < lookback + 2:
+        return None
+
+    # Take the trailing segment (avoid copying the full array)
+    seg = prices[-(lookback + 1):]
+
+    x = seg[:-1]          # S_{t-1}
+    y = np.diff(seg)      # ΔS_t
+
+    # Demean the regressor for numerical stability
+    x_mean = np.mean(x)
+    x_demeaned = x - x_mean
+
+    # Guard against degenerate series (all identical prices)
+    var_x = np.var(x_demeaned)
+    if var_x < 1e-12:
+        return None
+
+    # polyfit(x, y, 1) → [slope, intercept]  (y = slope·x + intercept)
+    try:
+        beta, _alpha = np.polyfit(x_demeaned, y, 1)
+    except np.linalg.LinAlgError:
+        return None
+
+    # Edge cases — non-stationary or explosive dynamics
+    #   β >= 0   → unit root or explosive (not mean-reverting)
+    #   β <= -1  → oscillating explosive (non-stationary)
+    if beta >= 0:
+        return None
+    if beta <= -1.0:
+        return None
+
+    # Exact discrete-time half-life for an AR(1): β^{H} = 0.5
+    #   H = -ln(2) / ln(1 + β)
+    half_life = -np.log(2.0) / np.log(1.0 + beta)
+
+    # Bounds check — half-life must be meaningful for intraday mean reversion
+    if half_life < 5.0 or half_life > 50.0:
+        return None
+
+    return half_life
 
 class MeanReversionStrategy(BaseStrategy):
     """True intraday mean-reversion strategy for S&P 500 and NASDAQ indices.
@@ -192,7 +269,7 @@ class MeanReversionStrategy(BaseStrategy):
         stop_distance = stop_mult * atr_val
         stop_loss = entry - stop_distance if direction == "BUY" else entry + stop_distance
 
-        take_profit = entry + (target_price - entry) * getattr(config, 'MR_TP_TARGET_MULT', 1.0)
+        take_profit = entry + (target_price - entry) * config.MR_TP_TARGET_MULT
 
         # R/R gate: TP must meet the minimum R/R ratio to survive slippage
         tp_distance = abs(take_profit - entry)
@@ -202,7 +279,7 @@ class MeanReversionStrategy(BaseStrategy):
         if (direction == "BUY" and take_profit <= entry) or (direction == "SELL" and take_profit >= entry):
             return None
             
-        if tp_distance < sl_distance * getattr(config, 'MR_MIN_RR', 1.0):
+        if tp_distance < sl_distance * config.MR_MIN_RR:
             logger.debug(
                 "%s %s: bad R/R (entry=%.2f, SL=%.2f, TP=%.2f)",
                 self.name, ticker, entry, stop_loss, take_profit,
@@ -255,7 +332,25 @@ class MeanReversionStrategy(BaseStrategy):
         # -- Trailing stop logic coupled to playbook --------------------
         #   A_CLIMAX → "vwap"      (trail along VWAP as it moves)
         #   B_QUIET  → "vwap"      (full exit via VWAP; could become "no_runner")
-        trail_logic = "vwap" if playbook == "A_CLIMAX" else "vwap"
+        trail_logic = "vwap"
+
+        # -- OU Half-Life Dynamic Time Stop -----------------------------
+        # Use detrended price (close - SMA) to isolate mean-reverting component
+        detrended = (close - sma20).dropna().to_numpy()
+        half_life = _estimate_ou_half_life(detrended)
+        if half_life is not None:
+            # 2H time stop: gives 2 half-lives for the trade to revert
+            time_stop_bars = max(5, min(100, int(np.ceil(2.0 * half_life))))
+            logger.debug(
+                "%s %s: OU half-life=%.1f bars → time_stop=%d bars",
+                self.name, ticker, half_life, time_stop_bars,
+            )
+        else:
+            time_stop_bars = 6  # sensible fallback (existing default)
+            logger.debug(
+                "%s %s: OU half-life N/A → time_stop=%d bars (fallback)",
+                self.name, ticker, time_stop_bars,
+            )
 
         # -- Record signal ----------------------------------------------
         self.record_signal(ticker)
@@ -273,6 +368,6 @@ class MeanReversionStrategy(BaseStrategy):
             atr=round(atr_val, 4),
             timestamp=datetime.now(timezone.utc),
             order_type=order_type,
-            time_stop_bars=6,
+            time_stop_bars=time_stop_bars,
             trailing_stop_logic=trail_logic,
         )

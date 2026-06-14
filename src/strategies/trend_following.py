@@ -35,6 +35,11 @@ class TrendFollowingStrategy(BaseStrategy):
     # PDBC: wider stops for oil volatility, stricter ADX to avoid chop
     PDBC_TP_MULT = 4.0         # ATR multiplier for initial bracket target
 
+    # ── EWMA Realized Volatility Regime Sizing ────────────────────────
+    # bars_per_day is inferred dynamically from the DataFrame index below.
+    TARGET_VOL_ANNUAL = 0.15     # 15 % target annualised volatility
+    VOL_REGIME_CAP = 3.0         # maximum inverse-vol multiplier
+
     def __init__(self) -> None:
         super().__init__(
             name=self.name,
@@ -44,8 +49,223 @@ class TrendFollowingStrategy(BaseStrategy):
         )
 
     # ──────────────────────────────────────────────────────────────────────
+    # EWMA Realized Volatility — inverse-vol regime sizing
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _compute_vol_regime_multiplier(self, df: pd.DataFrame) -> float:
+        """Compute an inverse-volatility sizing multiplier using EWMA.
+
+        Bars-per-day is inferred dynamically from the DataFrame index
+        frequency (or approximated via the median bar spacing).
+
+        Steps
+        -----
+        1. Daily returns  →  ``Close.pct_change()``
+        2. EWMA std(60)   →  responsive to regime shifts
+        3. Annualise      →  ``ewma_std * sqrt(252 * bars_per_day)``
+        4. Inverse weight →  ``TARGET_VOL_ANNUAL / annualised_vol``
+        5. Cap            →  ``min(weight, VOL_REGIME_CAP)``
+
+        Returns
+        -------
+        float
+            Multiplier in ``[0, VOL_REGIME_CAP]``.  Falls back to 1.0
+            when there is insufficient data or volatility is zero.
+        """
+        if df is None or len(df) < 62:
+            return 1.0
+
+        try:
+            # ── Dynamically infer bars per day ────────────────────────
+            bars_per_day = 1.0  # fallback
+            if isinstance(df.index, pd.DatetimeIndex) and len(df) >= 2:
+                delta_seconds = (
+                    df.index.to_series().diff().dt.total_seconds().median()
+                )
+                if pd.notna(delta_seconds) and delta_seconds > 0:
+                    bars_per_day = 86400.0 / delta_seconds
+
+            returns = df["Close"].pct_change()
+            ewma_std = returns.ewm(span=60, adjust=False).std()
+
+            current_ewma_std = float(ewma_std.iloc[-1])
+            if pd.isna(current_ewma_std) or current_ewma_std <= 0.0:
+                return 1.0
+
+            annualisation_factor = np.sqrt(252 * bars_per_day)
+            ewma_realized_vol_annual = current_ewma_std * annualisation_factor
+
+            multiplier = self.TARGET_VOL_ANNUAL / ewma_realized_vol_annual
+            multiplier = min(multiplier, self.VOL_REGIME_CAP)
+
+            logger.debug(
+                "vol_regime: ewma_std=%.6f  annual_vol=%.4f  mult=%.2f  bars_day=%.1f",
+                current_ewma_std, ewma_realized_vol_annual, multiplier, bars_per_day,
+            )
+            return multiplier
+        except Exception:
+            logger.exception("_compute_vol_regime_multiplier failed")
+            return 1.0
+
+    # ──────────────────────────────────────────────────────────────────────
     # Public entry point — dispatches to ticker-specific analyzers
     # ──────────────────────────────────────────────────────────────────────
+
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Shared confidence calculation (extracted from GLD / PDBC analyzers)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _compute_confidence(
+        self,
+        base_confidence: int,
+        direction: str,
+        histogram: pd.Series,
+        ema_diff: pd.Series,
+        current_ema_diff: float,
+        atr_val: float,
+        current_close: float,
+        current_ema50: float,
+        volume_above_avg: bool,
+        current_rsi: float,
+        current_adx: float,
+        htf_trend: Optional[str],
+        reason_parts: list[str],
+        *,
+        breakout_trigger: bool = False,
+        fresh_cross_up: bool = False,
+        fresh_cross_down: bool = False,
+        pullback_trigger: bool = False,
+        require_htf_alignment: bool = False,
+    ) -> float:
+        """Compute confidence score shared by GLD and PDBC analyzers.
+
+        Parameters
+        ----------
+        base_confidence : int
+            Starting confidence (40 for GLD, 30 for PDBC).
+        direction : str
+            Signal direction — ``"BUY"`` or ``"SELL"``.
+        histogram : pd.Series
+            MACD histogram series.
+        ema_diff : pd.Series
+            EMA20 - EMA50 difference series.
+        current_ema_diff : float
+            Last value of ``ema_diff``.
+        atr_val : float
+            Last ATR(14) value.
+        current_close : float
+            Last close price.
+        current_ema50 : float
+            Last EMA(50) value.
+        volume_above_avg : bool
+            Whether current volume exceeds its 20-bar average.
+        current_rsi : float
+            Last RSI value.
+        current_adx : float
+            Last ADX value.
+        htf_trend : Optional[str]
+            Higher-timeframe trend (``"bullish"``, ``"bearish"``, or ``None``).
+        reason_parts : list[str]
+            Mutable list to which reason annotations are appended.
+
+        Keyword-Only Parameters
+        -----------------------
+        breakout_trigger : bool
+            GLD-specific: inline breakout detection flag (smaller bonus).
+        fresh_cross_up : bool
+            PDBC-specific: fresh EMA crossover up detected.
+        fresh_cross_down : bool
+            PDBC-specific: fresh EMA crossover down detected.
+        pullback_trigger : bool
+            GLD-specific: pullback-to-EMA20 detected.
+        require_htf_alignment : bool
+            If True, HTF bonus only when trend aligns with signal direction
+            (PDBC behaviour). If False, award for any non-None HTF trend
+            (GLD behaviour).
+
+        Returns
+        -------
+        float
+            Confidence score capped at 90.
+        """
+        confidence = base_confidence
+
+        # ── MACD momentum accelerating (+15) ──────────────────────────
+        if len(histogram) >= 3:
+            if direction == "BUY" and histogram.iloc[-1] > histogram.iloc[-2] > histogram.iloc[-3]:
+                confidence += 15
+                reason_parts.append("MACD momentum accelerating")
+            elif direction == "SELL" and histogram.iloc[-1] < histogram.iloc[-2] < histogram.iloc[-3]:
+                confidence += 15
+                reason_parts.append("MACD momentum accelerating")
+
+        # ── EMA gap widening (+10) ────────────────────────────────────
+        if len(ema_diff) >= 2:
+            if abs(current_ema_diff) > abs(float(ema_diff.iloc[-2])):
+                confidence += 10
+                reason_parts.append("EMA gap widening")
+
+        # ── Fresh crossover bonus ─────────────────────────────────────
+        if breakout_trigger:
+            confidence += 10  # smaller increment — GLD already logged reason
+        elif direction == "BUY" and fresh_cross_up:
+            confidence += 15
+            reason_parts.append("Fresh EMA crossover up")
+        elif direction == "SELL" and fresh_cross_down:
+            confidence += 15
+            reason_parts.append("Fresh EMA crossover down")
+
+        # ── Price > 1 ATR from EMA50 in trend direction (+10) ────────
+        if direction == "BUY":
+            if current_close > current_ema50 + atr_val:
+                confidence += 10
+                reason_parts.append("Price > 1 ATR above EMA50")
+        else:
+            if current_close < current_ema50 - atr_val:
+                confidence += 10
+                reason_parts.append("Price > 1 ATR below EMA50")
+
+        # ── Volume above average (+10) ────────────────────────────────
+        if volume_above_avg:
+            confidence += 10
+            reason_parts.append("Volume above average")
+
+        # ── RSI exhaustion penalty (-15) ──────────────────────────────
+        if direction == "BUY" and current_rsi > config.TF_RSI_EXHAUSTION_HIGH:
+            confidence -= 15
+            reason_parts.append("RSI exhaustion warning")
+        elif direction == "SELL" and current_rsi < config.TF_RSI_EXHAUSTION_LOW:
+            confidence -= 15
+            reason_parts.append("RSI exhaustion warning")
+
+        # ── ADX strength bonuses (+10 / +5) ───────────────────────────
+        if current_adx > 30:
+            confidence += 10
+            reason_parts.append("ADX > 30")
+        if current_adx > 40:
+            confidence += 5
+            reason_parts.append("ADX > 40")
+
+        # ── Pullback bonus (+15) — GLD-specific ───────────────────────
+        if pullback_trigger:
+            confidence += 15
+            reason_parts.append("Pullback to EMA20")
+
+        # ── HTF alignment bonus (+10) ─────────────────────────────────
+        if require_htf_alignment:
+            if htf_trend is not None and (
+                (direction == "BUY" and htf_trend == "bullish")
+                or (direction == "SELL" and htf_trend == "bearish")
+            ):
+                confidence += 10
+                reason_parts.append(f"HTF {htf_trend}")
+        else:
+            if htf_trend is not None:
+                confidence += 10
+                reason_parts.append(f"HTF {htf_trend}")
+
+        return float(min(confidence, 90))
 
     def analyze(self, df: pd.DataFrame, ticker: str) -> Optional[StrategySignal]:
         """Analyze 4h OHLCV data and return a trend-following signal or None."""
@@ -62,6 +282,9 @@ class TrendFollowingStrategy(BaseStrategy):
         if self.is_on_cooldown(ticker):
             logger.debug("%s: %s on cooldown, skipping", self.name, ticker)
             return None
+
+        # ── EWMA vol regime multiplier (used by all tickers) ─────────
+        vol_regime_multiplier = self._compute_vol_regime_multiplier(df)
 
         # ── Common indicators ───────────────────────────────────────────
         close = df["Close"]
@@ -172,6 +395,7 @@ class TrendFollowingStrategy(BaseStrategy):
                 volume_above_avg=volume_above_avg,
                 htf_trend=htf_trend,
                 ticker=ticker,
+                vol_regime_multiplier=vol_regime_multiplier,
             )
         elif ticker == "PDBC":
             return self._analyze_pdbc(
@@ -189,6 +413,7 @@ class TrendFollowingStrategy(BaseStrategy):
                 volume_above_avg=volume_above_avg,
                 htf_trend=htf_trend,
                 ticker=ticker,
+                vol_regime_multiplier=vol_regime_multiplier,
             )
         else:
             logger.warning("%s: unsupported ticker %s", self.name, ticker)
@@ -214,6 +439,7 @@ class TrendFollowingStrategy(BaseStrategy):
         volume_above_avg: bool,
         htf_trend: Optional[str],
         ticker: str,
+        vol_regime_multiplier: float = 1.0,
     ) -> Optional[StrategySignal]:
         """GLD-specific analysis: trend-confirmed pullback/breakout entries."""
 
@@ -333,71 +559,25 @@ class TrendFollowingStrategy(BaseStrategy):
             stop_loss = entry + stop_mult * atr_val
             take_profit = entry - tp_mult * atr_val
 
-        # ── Confidence calculation ──────────────────────────────────
-        confidence = 40  # higher base — GLD is more selective
-
-        # MACD momentum accelerating (+15)
-        if gld_direction == "BUY":
-            if len(histogram) >= 3 and histogram.iloc[-1] > histogram.iloc[-2] > histogram.iloc[-3]:
-                confidence += 15
-                reason_parts.append("MACD momentum accelerating")
-        else:
-            if len(histogram) >= 3 and histogram.iloc[-1] < histogram.iloc[-2] < histogram.iloc[-3]:
-                confidence += 15
-                reason_parts.append("MACD momentum accelerating")
-
-        # EMA gap widening (+10)
-        if len(ema_diff) >= 2:
-            if abs(current_ema_diff) > abs(float(ema_diff.iloc[-2])):
-                confidence += 10
-                reason_parts.append("EMA gap widening")
-
-        # Fresh crossover bonus (+15) — already counted above if breakout
-        if breakout_trigger:
-            confidence += 10  # smaller increment since we already checked
-
-        # Price > 1 ATR from EMA50 in trend direction (+10)
-        if gld_direction == "BUY":
-            if current_close > current_ema50 + atr_val:
-                confidence += 10
-                reason_parts.append("Price > 1 ATR above EMA50")
-        else:
-            if current_close < current_ema50 - atr_val:
-                confidence += 10
-                reason_parts.append("Price > 1 ATR below EMA50")
-
-        # Volume above average (+10)
-        if volume_above_avg:
-            confidence += 10
-            reason_parts.append("Volume above average")
-
-        # RSI exhaustion penalty (-15)
-        if gld_direction == "BUY" and current_rsi > config.TF_RSI_EXHAUSTION_HIGH:
-            confidence -= 15
-            reason_parts.append("RSI exhaustion warning")
-        elif gld_direction == "SELL" and current_rsi < config.TF_RSI_EXHAUSTION_LOW:
-            confidence -= 15
-            reason_parts.append("RSI exhaustion warning")
-
-        # ADX strength bonuses (+10 / +5)
-        if current_adx > 30:
-            confidence += 10
-            reason_parts.append("ADX > 30")
-        if current_adx > 40:
-            confidence += 5
-            reason_parts.append("ADX > 40")
-
-        # Pullback bonus (+15)
-        if pullback_trigger:
-            confidence += 15
-            reason_parts.append("Pullback to EMA20")
-
-        # HTF alignment bonus (already required, but note it)
-        if htf_trend is not None:
-            confidence += 10
-            reason_parts.append(f"HTF {htf_trend}")
-
-        confidence = min(confidence, 90)
+        # ── Confidence calculation (shared helper) ───────────────────
+        confidence = self._compute_confidence(
+            base_confidence=40,
+            direction=gld_direction,
+            histogram=histogram,
+            ema_diff=ema_diff,
+            current_ema_diff=current_ema_diff,
+            atr_val=atr_val,
+            current_close=current_close,
+            current_ema50=current_ema50,
+            volume_above_avg=volume_above_avg,
+            current_rsi=current_rsi,
+            current_adx=current_adx,
+            htf_trend=htf_trend,
+            reason_parts=reason_parts,
+            breakout_trigger=breakout_trigger,
+            pullback_trigger=pullback_trigger,
+            require_htf_alignment=False,
+        )
 
         reason = " | ".join(reason_parts)
         reason += " | Trailing exit active"
@@ -419,6 +599,7 @@ class TrendFollowingStrategy(BaseStrategy):
             order_type="MARKET",
             time_stop_bars=15,
             trailing_stop_logic="atr",
+            vol_multiplier=vol_regime_multiplier,
         )
 
     # ──────────────────────────────────────────────────────────────────────
@@ -441,6 +622,7 @@ class TrendFollowingStrategy(BaseStrategy):
         volume_above_avg: bool,
         htf_trend: Optional[str],
         ticker: str,
+        vol_regime_multiplier: float = 1.0,
     ) -> Optional[StrategySignal]:
         """PDBC-specific analysis: chop avoidance, range expansion, wider stops."""
 
@@ -556,73 +738,25 @@ class TrendFollowingStrategy(BaseStrategy):
             stop_loss = entry + stop_mult * atr_val
             take_profit = entry - tp_mult * atr_val
 
-        # ── Confidence calculation ──────────────────────────────────
-        confidence = 30  # base
-
-        # MACD momentum accelerating (+15)
-        if direction == "BUY":
-            if len(histogram) >= 3 and histogram.iloc[-1] > histogram.iloc[-2] > histogram.iloc[-3]:
-                confidence += 15
-                reason_parts.append("MACD momentum accelerating")
-        else:
-            if len(histogram) >= 3 and histogram.iloc[-1] < histogram.iloc[-2] < histogram.iloc[-3]:
-                confidence += 15
-                reason_parts.append("MACD momentum accelerating")
-
-        # EMA gap widening (+10)
-        if len(ema_diff) >= 2:
-            if abs(current_ema_diff) > abs(float(ema_diff.iloc[-2])):
-                confidence += 10
-                reason_parts.append("EMA gap widening")
-
-        # Fresh crossover bonus (+15)
-        if direction == "BUY" and fresh_cross_up:
-            confidence += 15
-            reason_parts.append("Fresh EMA crossover up")
-        elif direction == "SELL" and fresh_cross_down:
-            confidence += 15
-            reason_parts.append("Fresh EMA crossover down")
-
-        # Price > 1 ATR from EMA50 in trend direction (+10)
-        if direction == "BUY":
-            if current_close > current_ema50 + atr_val:
-                confidence += 10
-                reason_parts.append("Price > 1 ATR above EMA50")
-        else:
-            if current_close < current_ema50 - atr_val:
-                confidence += 10
-                reason_parts.append("Price > 1 ATR below EMA50")
-
-        # Volume above average (+10)
-        if volume_above_avg:
-            confidence += 10
-            reason_parts.append("Volume above average")
-
-        # RSI exhaustion penalty (-15)
-        if direction == "BUY" and current_rsi > config.TF_RSI_EXHAUSTION_HIGH:
-            confidence -= 15
-            reason_parts.append("RSI exhaustion warning")
-        elif direction == "SELL" and current_rsi < config.TF_RSI_EXHAUSTION_LOW:
-            confidence -= 15
-            reason_parts.append("RSI exhaustion warning")
-
-        # ADX strength bonuses (+10 / +5)
-        if current_adx > 30:
-            confidence += 10
-            reason_parts.append("ADX > 30")
-        if current_adx > 40:
-            confidence += 5
-            reason_parts.append("ADX > 40")
-
-        # HTF alignment bonus (+10)
-        if htf_trend is not None:
-            if (direction == "BUY" and htf_trend == "bullish") or (
-                direction == "SELL" and htf_trend == "bearish"
-            ):
-                confidence += 10
-                reason_parts.append(f"HTF {htf_trend}")
-
-        confidence = min(confidence, 90)
+        # ── Confidence calculation (shared helper) ───────────────────
+        confidence = self._compute_confidence(
+            base_confidence=30,
+            direction=direction,
+            histogram=histogram,
+            ema_diff=ema_diff,
+            current_ema_diff=current_ema_diff,
+            atr_val=atr_val,
+            current_close=current_close,
+            current_ema50=current_ema50,
+            volume_above_avg=volume_above_avg,
+            current_rsi=current_rsi,
+            current_adx=current_adx,
+            htf_trend=htf_trend,
+            reason_parts=reason_parts,
+            fresh_cross_up=fresh_cross_up,
+            fresh_cross_down=fresh_cross_down,
+            require_htf_alignment=True,
+        )
 
         reason = " | ".join(reason_parts)
         reason += " | Trailing exit active"
@@ -644,4 +778,5 @@ class TrendFollowingStrategy(BaseStrategy):
             order_type="MARKET",
             time_stop_bars=9,
             trailing_stop_logic="tighter_atr",
+            vol_multiplier=vol_regime_multiplier,
         )

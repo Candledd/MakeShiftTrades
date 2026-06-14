@@ -12,12 +12,20 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 import config
+from src.indicators import calc_volume_profile
 from src.strategies import BaseStrategy, StrategySignal
 
 logger = logging.getLogger(__name__)
+
+# -- Volume Profile parameters (fallbacks if config not set) -------------------
+_VP_WINDOW: int = getattr(config, "VP_WINDOW", 100)
+_VP_NUM_BINS: int = getattr(config, "VP_NUM_BINS", 24)
+_VP_VA_THRESHOLD: float = getattr(config, "VP_VA_THRESHOLD", 0.70)
+_VP_POC_DIST_PCT: float = getattr(config, "VP_POC_DISTANCE_THRESHOLD", 0.003)
 
 
 class TrendPullbackStrategy(BaseStrategy):
@@ -56,7 +64,9 @@ class TrendPullbackStrategy(BaseStrategy):
     # ------------------------------------------------------------------
     def analyze(self, df: pd.DataFrame, ticker: str) -> Optional[StrategySignal]:
         # -- Minimum bars ------------------------------------------------
-        if len(df) < 50:
+        # Need at least 51 bars so we can exclude the last (unfinished) bar
+        # while still having 50 complete bars for indicators.
+        if len(df) < 51:
             logger.debug("%s: too few bars (%d)", self.name, len(df))
             return None
 
@@ -107,7 +117,6 @@ class TrendPullbackStrategy(BaseStrategy):
         current_lower = float(lower.iloc[-1])
         current_vwap = float(vwap.iloc[-1])
         low_last = float(low.iloc[-1])
-        high_last = float(high.iloc[-1])
 
         # -- Volume ratio ------------------------------------------------
         vol_mean = volume.rolling(20).mean().iloc[-1]
@@ -116,16 +125,42 @@ class TrendPullbackStrategy(BaseStrategy):
             return None
         vol_ratio = float(volume.iloc[-1]) / float(vol_mean)
 
+        # -- Volume Profile (POC & Value Area) ---------------------------
+        # Exclude the last (unfinished) bar to prevent it from biasing the POC.
+        vp_window = min(len(df) - 1, _VP_WINDOW)
+        vp_high = high.iloc[-(vp_window + 1):-1].values.astype(np.float64)
+        vp_low = low.iloc[-(vp_window + 1):-1].values.astype(np.float64)
+        vp_close = close.iloc[-(vp_window + 1):-1].values.astype(np.float64)
+        vp_volume = volume.iloc[-(vp_window + 1):-1].values.astype(np.float64)
+
+        poc_price, va_high, va_low, poc_volume = calc_volume_profile(
+            vp_high, vp_low, vp_close, vp_volume,
+            _VP_NUM_BINS, _VP_VA_THRESHOLD,
+        )
+
+        # Distance from current close to POC (as fraction of price)
+        poc_distance = abs(current_close - poc_price) / poc_price if poc_price > 0 else 0.0
+        near_poc = poc_distance <= _VP_POC_DIST_PCT
+
         # -- Entry logic (long only) ------------------------------------
         #
-        # Conditions:
-        #   1. Price is at or below the lower Bollinger Band (pullback)
-        #   2. RSI is weak but NOT collapsing (30–55)
-        #   3. Price is reclaiming the lower band (close back inside)
-        #   4. Volume is elevated (selling climax fading)
+        # Two entry paths (either one suffices):
         #
-        # Together these describe a "failed breakdown" in the context of
-        # a daily uptrend.
+        #   Path A — Classic Bollinger Band pullback (same as before)
+        #     1. Price at or below the lower Bollinger Band
+        #     2. RSI is weak but NOT collapsing (15–65)
+        #     3. Price is reclaiming the lower band (close back inside)
+        #     4. Volume is elevated (selling climax fading)
+        #
+        #   Path B — POC Distance + Node Breach (primary framework)
+        #     1. Distance to POC is within threshold (near the high-volume node)
+        #     2. Node Breach: price has breached below the POC or VA Low,
+        #        entering the discount / mean-reversion zone
+        #     3. RSI is weak but NOT collapsing (15–65)
+        #     4. Volume is elevated
+        #
+        # Path B uses POC "Distance to POC" and "Node Breach" as the primary
+        # decision criteria, reducing reliance on the Bollinger Band alone.
         # ----------------------------------------------------------------
 
         if htf_trend == "neutral":
@@ -137,8 +172,14 @@ class TrendPullbackStrategy(BaseStrategy):
 
         rsi_weak_not_collapsing = 15.0 <= current_rsi <= 65.0
         reclaiming_band = current_close > current_lower
-        
-        if not (at_lower_band and rsi_weak_not_collapsing and reclaiming_band and volume_confirm):
+
+        # Path A: classic Bollinger Band pullback
+        path_a = at_lower_band and rsi_weak_not_collapsing and reclaiming_band and volume_confirm
+        # Path B: POC Distance + Node Breach framework
+        node_breach = current_close < va_low or current_close < poc_price
+        path_b = near_poc and node_breach and rsi_weak_not_collapsing and volume_confirm
+
+        if not (path_a or path_b):
             return None
 
         direction: str = "BUY"
@@ -148,8 +189,8 @@ class TrendPullbackStrategy(BaseStrategy):
         order_type = "MARKET"
         stop_loss = self.compute_stop_loss(entry, direction, atr=atr_val)
 
-        # Take-profit: the higher of VWAP and SMA20
-        take_profit = max(current_vwap, current_sma20)
+        # Take-profit: the higher of VWAP, SMA20, and Value Area High
+        take_profit = max(current_vwap, current_sma20, va_high)
         
         if take_profit <= entry:
             logger.debug("%s %s: inverted TP/Entry (TP=%.2f <= Entry=%.2f)", self.name, ticker, take_profit, entry)
@@ -190,6 +231,16 @@ class TrendPullbackStrategy(BaseStrategy):
         if current_close < current_vwap * 0.997:
             confidence += 10.0
 
+        # -- POC / Volume Profile confidence boosts ----------------------
+        if near_poc:
+            confidence += 15.0                    # POC retest is a strong mean-reversion cue
+        if poc_distance < _VP_POC_DIST_PCT * 0.5:
+            confidence += 5.0                     # extremely close to POC
+        if current_close < poc_price < current_sma20:
+            confidence += 10.0                    # price below POC but POC below SMA20 = room to run
+        if current_close < va_low:
+            confidence += 5.0                     # below value area = discount zone
+
         # HTF Trend confidence adjustments
         if htf_trend == "bullish":
             confidence += 10.0
@@ -199,10 +250,13 @@ class TrendPullbackStrategy(BaseStrategy):
         confidence = min(90.0, confidence)
 
         # -- Reason -----------------------------------------------------
+        entry_path = "POC retest" if path_b and not path_a else "BB pullback + POC" if path_a and path_b else "BB pullback"
         reason = (
             f"Trend pullback {direction}: "
-            f"pullback to lower BB in {htf_trend} HTF trend, "
-            f"RSI={current_rsi:.1f}, reclaiming band"
+            f"{entry_path} in {htf_trend} HTF trend, "
+            f"RSI={current_rsi:.1f}, "
+            f"POC={poc_price:.2f}, VA=[{va_low:.2f}–{va_high:.2f}], "
+            f"POC dist={poc_distance*100:.2f}%"
         )
 
         # -- Record signal ----------------------------------------------
