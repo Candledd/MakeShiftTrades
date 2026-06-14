@@ -39,75 +39,142 @@ def _estimate_ou_half_life(
     prices: np.ndarray,
     lookback: int = 80,
 ) -> Optional[float]:
-    """Estimate the OU mean-reversion half-life via AR(1) regression.
+    """Estimate the OU mean-reversion half-life via Kalman-filtered AR(1).
 
-    Fits  ΔS_t = α + β·S_{t-1} + ε_t  using ``numpy.polyfit`` (deg=1).
+    Replaces the rolling ``numpy.polyfit`` regression with a 1D Kalman
+    Filter to avoid the "ghosting" effect of fixed-window estimators.
+
+    Formulates the AR(1) process :math:`S_t = \\alpha + \\beta S_{t-1} + \\varepsilon_t`
+    into state-space form where the hidden state is :math:`[\\alpha,\\, \\beta]^T`.
 
     The discrete-time half-life is computed as:
 
-        H = -ln(2) / ln(1 + β)
+        H = -\\ln(2) / \\ln(\\beta)
 
-    where *β* is the slope (theta) of the regression.  This formula is
-    exact for an AR(1) process, unlike the continuous approximation
-    ln(2)/|θ|.
+    where *β* is the AR(1) slope from the final Kalman state estimate.
 
     Parameters
     ----------
     prices : np.ndarray
-        Detrended price series (e.g. price - SMA) with at least
-        *lookback* + 2 observations.
+        Log-price series (``np.log(close)``) with at least
+        *lookback* + 2 observations.  The AR(1) state-space model
+        :math:`S_t = \\alpha + \\beta S_{t-1}` operates directly on
+        the (log-)price without pre-detrending.
     lookback : int
-        How many price-difference observations to regress over (default 80).
+        How many price observations to regress over (default 80).
 
     Returns
     -------
     float or None
         Half-life in bars, or None if the estimate is not mathematically
-        valid (β ≥ 0 — not mean-reverting; β ≤ -1 — non-stationary /
-        oscillating explosive; or half-life outside the 5–50 bar sanity
-        window).
+        valid (β ≥ 1 — explosive; β ≤ 0 — not mean-reverting; or half-life
+        outside the 5–50 bar sanity window).
     """
     if len(prices) < lookback + 2:
         return None
 
-    # Take the trailing segment (avoid copying the full array)
+    # Trailing window (avoid copying the full array)
     seg = prices[-(lookback + 1):]
 
-    x = seg[:-1]          # S_{t-1}
-    y = np.diff(seg)      # ΔS_t
-
-    # Demean the regressor for numerical stability
-    x_mean = np.mean(x)
-    x_demeaned = x - x_mean
-
-    # Guard against degenerate series (all identical prices)
-    var_x = np.var(x_demeaned)
-    if var_x < 1e-12:
+    # Guard against degenerate series (all identical / near-zero values)
+    seg_var = np.var(seg)
+    if seg_var < 1e-12:
         return None
 
-    # polyfit(x, y, 1) → [slope, intercept]  (y = slope·x + intercept)
-    try:
-        beta, _alpha = np.polyfit(x_demeaned, y, 1)
-    except np.linalg.LinAlgError:
+    # ── Kalman filter setup ────────────────────────────────────────────
+    # State vector: x = [α, β]^T   (S_t = α + β·S_{t-1} + ε_t)
+    # Observation:         y_t = S_t
+    # Measurement vector:  H_k = [1, S_{k-1}]
+
+    # Process noise covariance (random walk prior — near-constant state)
+    Q = np.eye(2) * 1e-6
+
+    # Observation noise variance — a fraction of the data variance,
+    # corresponding to the AR(1) innovation variance.
+    R = 0.5 * seg_var + 1e-8
+
+    # Initial state: start with zero coefficients
+    x = np.zeros(2)
+    # Initial covariance — high uncertainty
+    P = np.eye(2) * 10.0
+
+    I = np.eye(2)
+
+    # ── Recursive Kalman update ────────────────────────────────────────
+    for i in range(1, len(seg)):
+        y = seg[i]                     # S_t
+        H = np.array([1.0, seg[i - 1]])  # [1, S_{t-1}]
+
+        # Predict (state transition is identity — random walk)
+        P_pred = P + Q
+
+        # Update
+        innovation = y - H @ x
+        innov_cov = H @ P_pred @ H + R
+        K = P_pred @ H / innov_cov
+
+        x = x + K * innovation
+        P = (I - np.outer(K, H)) @ P_pred
+
+    # ── Extract β from final state estimate ────────────────────────────
+    beta = x[1]
+
+    # Edge cases — non-stationary or non-reverting dynamics
+    #   β >= 1  → explosive (unit root or worse)
+    #   β <= 0  → not mean-reverting (white noise or oscillatory)
+    if beta >= 1.0:
+        return None
+    if beta <= 0.0:
         return None
 
-    # Edge cases — non-stationary or explosive dynamics
-    #   β >= 0   → unit root or explosive (not mean-reverting)
-    #   β <= -1  → oscillating explosive (non-stationary)
-    if beta >= 0:
-        return None
-    if beta <= -1.0:
-        return None
-
-    # Exact discrete-time half-life for an AR(1): β^{H} = 0.5
-    #   H = -ln(2) / ln(1 + β)
-    half_life = -np.log(2.0) / np.log(1.0 + beta)
+    # Exact discrete-time half-life for AR(1): β^H = 0.5
+    half_life = -np.log(2.0) / np.log(beta)
 
     # Bounds check — half-life must be meaningful for intraday mean reversion
     if half_life < 5.0 or half_life > 50.0:
         return None
 
     return half_life
+
+
+# ── Named Constants (replacing magic numbers) ──────────────────────────────
+# Volatility thresholds
+MR_LOW_VOL_ATR_PCT = 0.003          # ATR% below which is considered low vol
+MR_QUIET_LOW_VOL_ATR_PCT = 0.002    # Even lower ATR% for quiet playbook boost
+
+# Band proximity factors (symmetric ~1% from the band)
+MR_CLOSE_ABOVE_BAND_FACTOR = 0.99   # close > band * 0.99 (bounce / proximity)
+MR_CLOSE_BELOW_BAND_FACTOR = 1.01   # close < band * 1.01 (rejection / proximity)
+
+# Deep break thresholds for climax playbook
+MR_DEEP_BREAK_LONG_FACTOR = 0.998   # prev_low < prev_lower * 0.998
+MR_DEEP_BREAK_SHORT_FACTOR = 1.002  # prev_high > prev_upper * 1.002
+
+# RSI thresholds for quiet playbook
+MR_QUIET_RSI_MAX = 45.0             # RSI must be below this for quiet BUY
+MR_QUIET_RSI_MIN = 55.0             # RSI must be above this for quiet SELL
+
+# RSI extremes for climax confidence boost
+MR_CLIMAX_RSI_EXTREME_LONG = 25.0   # RSI below this for climax BUY boost
+MR_CLIMAX_RSI_EXTREME_SHORT = 75.0  # RSI above this for climax SELL boost
+
+# VWAP deviation factors
+MR_VWAP_DISCOUNT_FACTOR = 0.998     # close < vwap * 0.998 (quiet BUY)
+MR_VWAP_PREMIUM_FACTOR = 1.002      # close > vwap * 1.002 (quiet SELL)
+MR_VWAP_DEEP_DISCOUNT = 0.996       # close < vwap * 0.996 (confidence boost)
+MR_VWAP_DEEP_PREMIUM = 1.004        # close > vwap * 1.004 (confidence boost)
+
+# Volume / climax thresholds
+MR_CLIMAX_VOL_RATIO = 2.0           # vol_ratio > 2.0 for climax boost
+
+# Wick confirmation factor (fraction of candle body)
+MR_WICK_CONFIRMATION_FRAC = 0.3     # wick >= 30% of candle for reversal confirmation
+
+# Stop loss adjustment for quiet playbook
+MR_QUIET_STOP_ADJ = 0.7             # stop_mult reduced by 30% for quiet playbook
+
+# Minimum bars required for Kalman filter to converge
+MR_MIN_BARS = 100                   # Kalman filter requires 82 bars; use 100 as margin
 
 class MeanReversionStrategy(BaseStrategy):
     """True intraday mean-reversion strategy for S&P 500 and NASDAQ indices.
@@ -127,21 +194,9 @@ class MeanReversionStrategy(BaseStrategy):
             period="5d",
         )
 
-    def compute_stop_loss(
-        self,
-        entry: float,
-        direction: str,
-        atr: float,
-    ) -> float:
-        stop_distance = config.MR_STOP_MULT * atr
-        if direction == "BUY":
-            return entry - stop_distance
-        else:
-            return entry + stop_distance
-
     def analyze(self, df: pd.DataFrame, ticker: str) -> Optional[StrategySignal]:
         # -- Minimum bars ------------------------------------------------
-        if len(df) < 30:
+        if len(df) < MR_MIN_BARS:
             logger.debug("%s: too few bars (%d)", self.name, len(df))
             return None
 
@@ -167,8 +222,11 @@ class MeanReversionStrategy(BaseStrategy):
         rs = avg_gain / avg_loss
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        # -- VWAP --------------------------------------------------------
-        vwap = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
+        # -- VWAP (daily-resetting intraday VWAP) -------------------------
+        # Group by trading day so the cumulative sum resets for each session
+        cum_pv = (df["Close"] * df["Volume"]).groupby(df.index.normalize()).cumsum()
+        cum_vol = df["Volume"].groupby(df.index.normalize()).cumsum()
+        vwap = cum_pv / cum_vol
 
         # -- Current values (last bar) -----------------------------------
         current_close = float(close.iloc[-1])
@@ -195,7 +253,7 @@ class MeanReversionStrategy(BaseStrategy):
         
         # Volatility check for Quiet Playbook
         atr_pct = atr_val / current_close
-        is_low_vol = atr_pct < 0.003  # less than 0.3% ATR
+        is_low_vol = atr_pct < MR_LOW_VOL_ATR_PCT
         
         for offset in range(2, min(len(df), 5)):
             prev_low = float(low.iloc[-offset])
@@ -205,12 +263,12 @@ class MeanReversionStrategy(BaseStrategy):
             
             # --- Playbook A: Climax Failed-Extension ---
             # Requires elevated volume, deep band break, and extreme RSI
-            is_deep_break_long = prev_low < prev_lower * 0.998
-            is_deep_break_short = prev_high > prev_upper * 1.002
+            is_deep_break_long = prev_low < prev_lower * MR_DEEP_BREAK_LONG_FACTOR
+            is_deep_break_short = prev_high > prev_upper * MR_DEEP_BREAK_SHORT_FACTOR
             
             if (
                 is_deep_break_long
-                and current_close > current_lower * 0.99
+                and current_close > current_lower * MR_CLOSE_ABOVE_BAND_FACTOR
                 and current_rsi < config.MR_RSI_OVERSOLD
                 and vol_ratio > max(1.2, config.MR_VOL_SPIKE_MULT)
                 and vol_ratio <= 10.0
@@ -222,7 +280,7 @@ class MeanReversionStrategy(BaseStrategy):
                 
             if (
                 is_deep_break_short
-                and current_close < current_upper * 1.01
+                and current_close < current_upper * MR_CLOSE_BELOW_BAND_FACTOR
                 and current_rsi > config.MR_RSI_OVERBOUGHT
                 and vol_ratio > max(1.2, config.MR_VOL_SPIKE_MULT)
                 and vol_ratio <= 10.0
@@ -236,10 +294,10 @@ class MeanReversionStrategy(BaseStrategy):
             # Requires low realized vol, VWAP deviation, less extreme RSI, no vol spike needed
             if is_low_vol:
                 if (
-                    prev_low < prev_lower * 1.01
-                    and current_close > current_lower * 0.99
-                    and current_rsi < 45.0
-                    and current_close < current_vwap * 0.998
+                    prev_low < prev_lower * MR_CLOSE_BELOW_BAND_FACTOR
+                    and current_close > current_lower * MR_CLOSE_ABOVE_BAND_FACTOR
+                    and current_rsi < MR_QUIET_RSI_MAX
+                    and current_close < current_vwap * MR_VWAP_DISCOUNT_FACTOR
                 ):
                     direction = "BUY"
                     playbook = "B_QUIET"
@@ -247,10 +305,10 @@ class MeanReversionStrategy(BaseStrategy):
                     break
                     
                 if (
-                    prev_high > prev_upper * 0.99
-                    and current_close < current_upper * 1.01
-                    and current_rsi > 55.0
-                    and current_close > current_vwap * 1.002
+                    prev_high > prev_upper * MR_CLOSE_ABOVE_BAND_FACTOR
+                    and current_close < current_upper * MR_CLOSE_BELOW_BAND_FACTOR
+                    and current_rsi > MR_QUIET_RSI_MIN
+                    and current_close > current_vwap * MR_VWAP_PREMIUM_FACTOR
                 ):
                     direction = "SELL"
                     playbook = "B_QUIET"
@@ -265,7 +323,7 @@ class MeanReversionStrategy(BaseStrategy):
         order_type = "LIMIT" if config.USE_LIMIT_ORDERS_MR else "MARKET"
 
         # Tighter stop for Quiet Playbook
-        stop_mult = config.MR_STOP_MULT if playbook == "A_CLIMAX" else config.MR_STOP_MULT * 0.7
+        stop_mult = config.MR_STOP_MULT if playbook == "A_CLIMAX" else config.MR_STOP_MULT * MR_QUIET_STOP_ADJ
         stop_distance = stop_mult * atr_val
         stop_loss = entry - stop_distance if direction == "BUY" else entry + stop_distance
 
@@ -291,31 +349,31 @@ class MeanReversionStrategy(BaseStrategy):
 
         if playbook == "A_CLIMAX":
             # Climax rewards extreme RSI, high volume, and deep wicks
-            if direction == "BUY" and current_rsi < 25:
+            if direction == "BUY" and current_rsi < MR_CLIMAX_RSI_EXTREME_LONG:
                 confidence += 15.0
-            elif direction == "SELL" and current_rsi > 75:
+            elif direction == "SELL" and current_rsi > MR_CLIMAX_RSI_EXTREME_SHORT:
                 confidence += 15.0
                 
-            if vol_ratio > 2.0:
+            if vol_ratio > MR_CLIMAX_VOL_RATIO:
                 confidence += 10.0
                 
         elif playbook == "B_QUIET":
             # Quiet rewards low vol and tight price action, but caps confidence slightly lower
             # since it is not a major structural reversal
             confidence = 35.0
-            if atr_pct < 0.002:
+            if atr_pct < MR_QUIET_LOW_VOL_ATR_PCT:
                 confidence += 15.0
-            if direction == "BUY" and current_close < current_vwap * 0.996:
+            if direction == "BUY" and current_close < current_vwap * MR_VWAP_DEEP_DISCOUNT:
                 confidence += 15.0
-            elif direction == "SELL" and current_close > current_vwap * 1.004:
+            elif direction == "SELL" and current_close > current_vwap * MR_VWAP_DEEP_PREMIUM:
                 confidence += 15.0
 
         # Wick on the failed-extension bar (reversal confirmation) applies to both
         for offset in range(2, min(len(df), 5)):
-            if direction == "BUY" and float(close.iloc[-offset]) > float(low.iloc[-offset]) + (float(close.iloc[-offset]) - float(low.iloc[-offset])) * 0.3:
+            if direction == "BUY" and float(close.iloc[-offset]) > float(low.iloc[-offset]) + (float(close.iloc[-offset]) - float(low.iloc[-offset])) * MR_WICK_CONFIRMATION_FRAC:
                 confidence += 10.0
                 break
-            elif direction == "SELL" and float(close.iloc[-offset]) < float(high.iloc[-offset]) - (float(high.iloc[-offset]) - float(close.iloc[-offset])) * 0.3:
+            elif direction == "SELL" and float(close.iloc[-offset]) < float(high.iloc[-offset]) - (float(high.iloc[-offset]) - float(close.iloc[-offset])) * MR_WICK_CONFIRMATION_FRAC:
                 confidence += 10.0
                 break
 
@@ -335,8 +393,9 @@ class MeanReversionStrategy(BaseStrategy):
         trail_logic = "vwap"
 
         # -- OU Half-Life Dynamic Time Stop -----------------------------
-        # Use detrended price (close - SMA) to isolate mean-reverting component
-        detrended = (close - sma20).dropna().to_numpy()
+        # Use np.log(close) as the input series for the AR(1) state-space model
+        # S_t = α + β·S_{t-1} + ε_t  (raw log-price, no detrending needed)
+        detrended = np.log(close).dropna().to_numpy()
         half_life = _estimate_ou_half_life(detrended)
         if half_life is not None:
             # 2H time stop: gives 2 half-lives for the trade to revert

@@ -7,6 +7,8 @@ from src.strategies import StrategySignal
 from src.database import get_realized_pnl, get_strategy_expectancy
 import config as _cfg
 
+import time
+
 RISK_ON_ASSETS = {"SPY", "QQQ", "IWM", "DIA"}
 CRYPTO_ASSETS = {"BTC-USD", "ETH-USD", "BTCUSD", "ETHUSD"}
 COMMODITY_ASSETS = {"GLD", "PDBC", "GC=F", "CL=F"}
@@ -19,6 +21,9 @@ SPY_QQQ_UNIT = {"SPY", "QQQ"}
 MAX_STOP_PCT = 0.10      # Maximum stop distance as fraction of entry (10%)
 MIN_STOP_PCT = 0.001     # Minimum stop distance as fraction of entry (0.1%)
 MIN_RR_RATIO = 1.0       # Universal minimum reward/risk ratio (fallback)
+
+# Cache TTL for correlation price data (1 hour in seconds)
+CORR_CACHE_TTL_SECONDS = 3600
 
 
 class RiskManager:
@@ -44,6 +49,9 @@ class RiskManager:
         self._tier_equity_pct = getattr(_cfg, 'RISK_TIER_EQUITY_PCT', 0.0025)
         self._tier_crypto_pct = getattr(_cfg, 'RISK_TIER_CRYPTO_PCT', 0.0050)
         self._tier_commodity_pct = getattr(_cfg, 'RISK_TIER_COMMODITY_PCT', 0.0035)
+
+        # ── In-memory price cache for correlation penalty (value = (Series, timestamp)) ──
+        self._price_cache: dict[str, tuple[pd.Series, float]] = {}
 
         # ── Spread / liquidity cap ────────────────────────────────────
         self._spread_atr_cap_pct = getattr(_cfg, 'SPREAD_ATR_CAP_PCT', 0.05)
@@ -144,33 +152,33 @@ class RiskManager:
                         symbols.add(k)
         return symbols
 
+    def _resolve_asset_tier(self, ticker: str) -> str:
+        """Return the asset tier name for *ticker*: 'equity', 'crypto', 'commodity', or 'unknown'."""
+        resolved = self._resolve_ticker(ticker)
+        if resolved in COMMODITY_ASSETS or ticker in COMMODITY_ASSETS:
+            return "commodity"
+        if resolved in CRYPTO_ASSETS or ticker in CRYPTO_ASSETS:
+            return "crypto"
+        if resolved in RISK_ON_ASSETS or ticker in RISK_ON_ASSETS:
+            return "equity"
+        return "unknown"
+
     def _get_tier_risk_pct(self, signal: StrategySignal) -> float:
         """Return the risk-per-trade percentage for the signal's asset class.
 
         Falls back to *self.max_risk_pct* for tickers not in any known tier.
         """
-        ticker = self._resolve_ticker(signal.ticker)
-
-        if ticker in COMMODITY_ASSETS or signal.ticker in COMMODITY_ASSETS:
-            return self._tier_commodity_pct
-        if ticker in CRYPTO_ASSETS or signal.ticker in CRYPTO_ASSETS:
-            return self._tier_crypto_pct
-        if ticker in RISK_ON_ASSETS or signal.ticker in RISK_ON_ASSETS:
-            return self._tier_equity_pct
-
-        # Unknown asset — use general cap
-        return self.max_risk_pct
+        tier = self._resolve_asset_tier(signal.ticker)
+        mapping = {
+            "commodity": self._tier_commodity_pct,
+            "crypto":    self._tier_crypto_pct,
+            "equity":    self._tier_equity_pct,
+        }
+        return mapping.get(tier, self.max_risk_pct)
 
     def _get_tier_name(self, signal: StrategySignal) -> str:
         """Human-readable tier name for log messages."""
-        ticker = self._resolve_ticker(signal.ticker)
-        if ticker in COMMODITY_ASSETS or signal.ticker in COMMODITY_ASSETS:
-            return "commodity"
-        if ticker in CRYPTO_ASSETS or signal.ticker in CRYPTO_ASSETS:
-            return "crypto"
-        if ticker in RISK_ON_ASSETS or signal.ticker in RISK_ON_ASSETS:
-            return "equity"
-        return "unknown"
+        return self._resolve_asset_tier(signal.ticker)
 
     # ── Spread / Liquidity Validation ─────────────────────────────────
 
@@ -259,6 +267,7 @@ class RiskManager:
     def calculate_position_size(
         self, signal: StrategySignal, account_equity: float, signal_regime: Optional[str] = None,
         ml_multiplier: float = 1.0, ev_r: float = 0.0, sample_size: int = 0,
+        current_positions: Optional[list[dict]] = None,
     ) -> float:
         """Adaptive Stop-distance-based position sizing with tiered risk,
         volatility shock protection, gap/slippage buffer, ML multiplier,
@@ -306,6 +315,14 @@ class RiskManager:
             tier_risk_pct * ai_mult * dd_multiplier * conf_multiplier * shock_mult
         )
         
+        # 8. Correlation Penalty (Portfolio-Level)
+        correlation_multiplier = 1.0
+        if current_positions is not None:
+            correlation_multiplier = self._compute_correlation_penalty(
+                signal.ticker, current_positions, signal.direction,
+            )
+            adaptive_risk_pct *= correlation_multiplier
+
         # Fat-Tail Vol-of-Vol Scalar (Injected directly from strategy)
         if hasattr(signal, 'fat_tail_scalar') and signal.fat_tail_scalar != 1.0:
             adaptive_risk_pct *= signal.fat_tail_scalar
@@ -359,13 +376,14 @@ class RiskManager:
 
         self.logger.info(
             "Adaptive Sizing | Tier: %s @ %.4f%% | Conf: %.1f%% | "
-            "Shock: %.2fx | DD: %.2fx | Risk: %.3f%% ($%.2f) | Notional: $%.2f | "
-            "ML: %.2fx | Exp: %.2fx (ev_r=%.3f, n=%d)",
+            "Shock: %.2fx | DD: %.2fx | Corr: %.2fx | Risk: %.3f%% ($%.2f) | "
+            "Notional: $%.2f | ML: %.2fx | Exp: %.2fx (ev_r=%.3f, n=%d)",
             tier_name,
             tier_risk_pct * 100,
             confidence_clamped,
             shock_mult,
             dd_multiplier,
+            correlation_multiplier,
             adaptive_risk_pct * 100,
             risk_dollars,
             notional,
@@ -377,6 +395,25 @@ class RiskManager:
         return notional
 
     # ── Correlation Filter ─────────────────────────────────────────────
+
+    def _compute_position_risk_usd(
+        self, symbols: set[str], position_state: dict, current_positions: list[dict],
+    ) -> float:
+        """Compute total portfolio risk USD for the given set of symbols.
+
+        Uses *position_state* (entry_price, stop_loss, qty) when available,
+        otherwise falls back to ``market_value * get_fallback_risk_pct()``.
+        """
+        total = 0.0
+        for sym in symbols:
+            state = position_state.get(sym)
+            if state is not None and "entry_price" in state and "stop_loss" in state:
+                total += abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0.0)
+            else:
+                pos = next((p for p in current_positions if p.get('symbol') == sym), None)
+                if pos:
+                    total += pos.get('market_value', 0.0) * self.get_fallback_risk_pct(sym)
+        return total
 
     def check_correlation_filter(
         self,
@@ -408,7 +445,6 @@ class RiskManager:
 
         # ── Portfolio Heat Check — Total Open Risk ──────────────────────────
         # Include both open positions AND pending orders in the risk calculation
-        total_risk_usd = 0.0
         heat_symbols: set[str] = set()
         for pos in current_positions:
             sym = pos.get("symbol", "")
@@ -418,16 +454,7 @@ class RiskManager:
             sym = o.get("symbol", "")
             if sym:
                 heat_symbols.add(sym)
-        for sym in heat_symbols:
-            state = position_state.get(sym)
-            if state is not None and "entry_price" in state and "stop_loss" in state:
-                risk_usd = abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0.0)
-                total_risk_usd += risk_usd
-            else:
-                # Fallback after restart if state is missing
-                pos = next((p for p in current_positions if p.get('symbol') == sym), None)
-                if pos:
-                    total_risk_usd += pos.get('market_value', 0.0) * self.get_fallback_risk_pct(sym)
+        total_risk_usd = self._compute_position_risk_usd(heat_symbols, position_state, current_positions)
 
         # ── Include proposed trade risk in portfolio heat ─────────────
         if proposed_notional > 0 and signal.entry > 0:
@@ -449,17 +476,11 @@ class RiskManager:
 
         # ── Cluster Risk Check ──────────────────────────────────────────────
         def _cluster_risk(cluster_set: set[str]) -> float:
-            risk = 0.0
-            for sym in heat_symbols:
-                if sym in cluster_set or self._ticker_map.get(sym, sym) in cluster_set:
-                    state = position_state.get(sym)
-                    if state is not None and "entry_price" in state and "stop_loss" in state:
-                        risk += abs(state["entry_price"] - state["stop_loss"]) * state.get("qty", 0.0)
-                    else:
-                        pos = next((p for p in current_positions if p.get('symbol') == sym), None)
-                        if pos:
-                            risk += pos.get('market_value', 0.0) * self.get_fallback_risk_pct(sym)
-            return risk
+            cluster_symbols = {
+                sym for sym in heat_symbols
+                if sym in cluster_set or self._ticker_map.get(sym, sym) in cluster_set
+            }
+            return self._compute_position_risk_usd(cluster_symbols, position_state, current_positions)
 
         if account_equity > 0:
             max_cluster_pct = _cfg.MAX_CLUSTER_RISK_PCT
@@ -552,6 +573,135 @@ class RiskManager:
                 return (False, "Correlation filter: 2+ risk-on shorts already open")
 
         return (True, "OK")
+
+    # ── Correlation Penalty (Portfolio-Level Sizing) ──────────────────
+
+    def _compute_correlation_penalty(
+        self, signal_ticker: str, current_positions: list[dict], signal_direction: str,
+    ) -> float:
+        """Compute a direction-aware, notional-weighted correlation penalty multiplier.
+
+        Fetches the last 60 days of daily Close prices for the signal ticker
+        and all currently open tickers using ``yfinance``.  Calculates the
+        Pearson correlation matrix of their daily returns and computes the
+        notional-weighted average correlation of the new ticker against the
+        existing portfolio.
+
+        The weight of each existing position is proportional to its *market_value*.
+        Position *side* (``"long"`` / ``"short"``) is compared to the signal
+        *direction* (``"BUY"`` / ``"SELL"``).  Opposite-direction positions are
+        treated as hedges — their correlation contributes *negatively* to the
+        weighted average, reducing the penalty.
+
+        The penalty multiplier is::
+
+            multiplier = 1.0 - max(0, avg_weighted_corr * 0.8)   [floored at 0.2]
+
+        Price data is cached in ``self._price_cache`` with a 1-hour TTL.
+        Returns ``1.0`` when there are fewer than two tickers, when data
+        cannot be fetched, or when the notional-weighted average correlation
+        is zero or negative.
+        """
+        import yfinance as yf
+
+        # 1. Collect all unique tickers
+        tickers: set[str] = {signal_ticker}
+        for pos in current_positions:
+            sym = pos.get("symbol", "")
+            if sym:
+                tickers.add(sym)
+
+        if len(tickers) < 2:
+            return 1.0
+
+        ticker_list = sorted(tickers)
+        now = time.time()
+
+        # 2. Download price data for uncached or expired tickers
+        uncached: list[str] = []
+        for t in ticker_list:
+            entry = self._price_cache.get(t)
+            if entry is None or (now - entry[1]) > CORR_CACHE_TTL_SECONDS:
+                uncached.append(t)
+
+        if uncached:
+            try:
+                data = yf.download(uncached, period="60d", progress=False)
+                if data.empty:
+                    return 1.0
+
+                if isinstance(data.columns, pd.MultiIndex):
+                    for t in uncached:
+                        if 'Close' in data and t in data['Close'].columns:
+                            self._price_cache[t] = (data['Close'][t].dropna(), now)
+                else:
+                    if 'Close' in data.columns:
+                        self._price_cache[uncached[0]] = (data['Close'].dropna(), now)
+            except Exception:
+                self.logger.warning(
+                    "Correlation penalty: yfinance download failed for %s", uncached,
+                    exc_info=True,
+                )
+                return 1.0
+
+        # 3. Build DataFrame of Close prices from cache
+        close_series: dict[str, pd.Series] = {}
+        for t in ticker_list:
+            entry = self._price_cache.get(t)
+            if entry is not None:
+                close_series[t] = entry[0]
+
+        if len(close_series) < 2:
+            return 1.0
+
+        close_df = pd.DataFrame(close_series).dropna(how="any")
+        if len(close_df) < 5:
+            return 1.0  # Not enough overlapping data points
+
+        # 4. Daily returns & Pearson correlation matrix
+        returns_df = close_df.pct_change().dropna()
+        if returns_df.empty:
+            return 1.0
+
+        corr_matrix = returns_df.corr(method="pearson")
+
+        # 5. Notional-weighted, direction-aware average correlation
+        other_tickers = [t for t in ticker_list if t != signal_ticker and t in close_series]
+        if not other_tickers:
+            return 1.0
+
+        # Map signal direction to canonical side
+        signal_is_long = signal_direction.upper() == "BUY"
+
+        total_notional = 0.0
+        weighted_sum = 0.0
+
+        for pos in current_positions:
+            sym = pos.get("symbol", "")
+            if sym not in other_tickers:
+                continue
+            notional = pos.get("market_value", 0.0)
+            if notional <= 0:
+                continue
+
+            pos_side = pos.get("side", "").lower()
+            same_direction = (signal_is_long and pos_side == "long") or (
+                not signal_is_long and pos_side == "short"
+            )
+            direction_sign = 1.0 if same_direction else -1.0
+
+            corr_val = corr_matrix.loc[signal_ticker, sym]
+            weighted_sum += corr_val * direction_sign * notional
+            total_notional += notional
+
+        if total_notional <= 0:
+            return 1.0
+
+        avg_weighted_corr = weighted_sum / total_notional
+
+        # 6. Scale down only for positive net weighted correlation
+        multiplier = 1.0 - max(0.0, avg_weighted_corr * 0.8)
+        return max(0.2, multiplier)
 
     # ── VIX & Market Stress Gating ─────────────────────────────────────
 
@@ -737,6 +887,7 @@ class RiskManager:
             signal, account_equity, signal_regime=signal_regime,
             ml_multiplier=ml_multiplier,
             ev_r=ev_r, sample_size=sample_size,
+            current_positions=current_positions,
         )
         if notional <= 0:
             self.logger.info(

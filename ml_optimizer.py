@@ -432,7 +432,7 @@ if __name__ == "__main__":
     print("Data loaded. Starting Optuna study...")
     
     study = optuna.create_study(
-        study_name="makeshift_trades_6mo_v3",
+        study_name="makeshift_trades_6mo_v4",
         storage="sqlite:///optuna_study.db?timeout=60",
         direction="maximize",
         load_if_exists=True
