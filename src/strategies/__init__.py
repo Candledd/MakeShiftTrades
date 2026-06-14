@@ -109,6 +109,35 @@ class BaseStrategy(ABC):
         else:
             raise ValueError(f"Invalid direction: {direction}")
 
+    def compute_vpin(self, df: pd.DataFrame, window: int) -> float:
+        """Compute VPIN over the last *window* bars using Bulk Volume Classification.
+
+        Drops any rows with NaN in required columns, extracts the last
+        *window* bars, and delegates to the Numba-compiled ``calc_vpin``.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            OHLCV DataFrame with at least *window* rows.
+        window : int
+            Rolling window length for standard deviation and VPIN computation.
+
+        Returns
+        -------
+        float
+            The VPIN value (0–1).  Returns 0.0 if insufficient data.
+        """
+        from src.indicators import calc_vpin
+
+        clean = df.dropna(subset=["Open", "Close", "Volume"])
+        if len(clean) < 2:
+            return 0.0
+
+        open_np = clean["Open"].values[-window:]
+        close_np = clean["Close"].values[-window:]
+        volume_np = clean["Volume"].values[-window:]
+        return calc_vpin(open_np, close_np, volume_np, window)
+
     def is_on_cooldown(self, ticker: str) -> bool:
         """Check if the given ticker is currently in cooldown.
 

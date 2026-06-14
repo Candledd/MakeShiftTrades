@@ -205,6 +205,19 @@ class MeanReversionStrategy(BaseStrategy):
         low = df["Low"]
         volume = df["Volume"]
 
+        # ── VPIN toxicity gate ------------------------------------------
+        # VPIN > VPIN_MR_BLOCK_THRESHOLD → order flow is highly toxic
+        # (informed traders driving the price).  Block any mean-reversion
+        # fade in this regime.
+        if len(df) >= config.VPIN_WINDOW:
+            vpin = self.compute_vpin(df, config.VPIN_WINDOW)
+            if vpin > config.VPIN_MR_BLOCK_THRESHOLD:
+                logger.debug(
+                    "%s %s: VPIN toxicity too high to fade (%.4f > %.2f).",
+                    self.name, ticker, vpin, config.VPIN_MR_BLOCK_THRESHOLD,
+                )
+                return None
+
         atr_val = self.compute_atr(df)
 
         # -- Bollinger Bands ---------------------------------------------

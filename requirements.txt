@@ -11,3 +11,7 @@ alpaca-py>=0.20.0
 
 # Web server (for future frontend)
 flask>=3.0.0
+
+# Regime classification
+hmmlearn>=0.3.2
+scikit-learn>=1.3.0

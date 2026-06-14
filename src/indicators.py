@@ -3,6 +3,8 @@
 Provides:
   - calc_volume_profile: ``@njit`` function computing a rolling Volume Profile,
     returning the Point of Control (POC) and Value Area (VA) boundaries.
+  - calc_vpin: ``@njit`` function computing VPIN using Bulk Volume
+    Classification via the Normal CDF approximation.
 """
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ from typing import Tuple
 
 import numpy as np
 from numba import njit
+
+import math
 
 
 @njit
@@ -181,3 +185,92 @@ def calc_volume_profile(
     va_high_price = min_price + (va_high_idx + 1) * bin_size
 
     return poc_price, va_high_price, va_low_price, poc_volume
+
+@njit
+def calc_vpin(
+    open_p: np.ndarray,
+    close_p: np.ndarray,
+    volume: np.ndarray,
+    window: int,
+) -> float:
+    """Compute VPIN using Bulk Volume Classification (BVC).
+
+    Approximates the Volume-Synchronized Probability of Informed Trading
+    using the Normal CDF for buy volume classification.
+
+    Parameters
+    ----------
+    open_p : np.ndarray
+        1-D array of open prices.
+    close_p : np.ndarray
+        1-D array of close prices.
+    volume : np.ndarray
+        1-D array of volume values.
+    window : int
+        The rolling window length for standard deviation and VPIN computation.
+
+    Returns
+    -------
+    vpin : float
+        The VPIN value for the window.
+    """
+    n = len(close_p)
+    if n < 2 or window < 2:
+        return 0.0
+
+    # Use the last ``window`` bars, or all if fewer
+    start = max(0, n - window)
+    count = n - start
+
+    if count < 2:
+        return 0.0
+
+    # Compute price changes and extract volumes for the window
+    deltas = np.empty(count, dtype=np.float64)
+    vols = np.empty(count, dtype=np.float64)
+    for i in range(count):
+        deltas[i] = close_p[start + i] - open_p[start + i]
+        vols[i] = volume[start + i]
+
+    # Standard deviation of deltas over the window
+    mean_delta = 0.0
+    for i in range(count):
+        mean_delta += deltas[i]
+    mean_delta /= count
+
+    variance = 0.0
+    for i in range(count):
+        diff = deltas[i] - mean_delta
+        variance += diff * diff
+    variance /= count
+    sigma = math.sqrt(variance)
+
+    # Classify buy volume using the Normal CDF approximation
+    buy_vols = np.empty(count, dtype=np.float64)
+    total_volume = 0.0
+
+    if sigma <= 1e-10:
+        for i in range(count):
+            if deltas[i] > 0:
+                buy_vols[i] = vols[i]          # 100% buy volume
+            elif deltas[i] < 0:
+                buy_vols[i] = 0.0              # 0% buy volume
+            else:  # deltas[i] == 0
+                buy_vols[i] = vols[i] * 0.5    # 50-50 split
+            total_volume += vols[i]
+    else:
+        factor = sigma * math.sqrt(2.0)
+        for i in range(count):
+            buy_vols[i] = vols[i] * 0.5 * (1.0 + math.erf(deltas[i] / factor))
+            total_volume += vols[i]
+
+    if total_volume <= 0.0:
+        return 0.0
+
+    # Compute order imbalance and VPIN
+    total_imbalance = 0.0
+    for i in range(count):
+        total_imbalance += abs(2.0 * buy_vols[i] - vols[i])
+
+    vpin = total_imbalance / total_volume
+    return vpin

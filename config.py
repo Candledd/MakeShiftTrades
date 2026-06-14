@@ -231,6 +231,11 @@ try:
 except ValueError:
     raise ValueError("TP_VOL_SPIKE_MULT must be a valid number")
 
+# ── VPIN (Volume-Synchronized Probability of Informed Trading) ─────────────
+VPIN_WINDOW = 50
+VPIN_MR_BLOCK_THRESHOLD = 0.75
+VPIN_MB_BOOST_THRESHOLD = 0.70
+
 # ── Volume Profile (Numba POC / Value Area) ──────────────────────────────────
 try:
     VP_WINDOW = int(os.getenv("VP_WINDOW", "100"))

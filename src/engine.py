@@ -27,6 +27,7 @@ from src.risk_manager import RiskManager
 from src.alpaca_trader import AlpacaTrader
 from src.macro_filter import MacroFilter
 from src.database import init_db, log_trade, get_strategy_expectancy
+from src.regime_classifier import RegimeClassifier
 try:
     from src.trailing_stops import calculate_trailing_stop, get_strategy_trailing_logic
 except ImportError:
@@ -91,6 +92,11 @@ class TradingEngine:
                 logger.warning("Check macro_calendar.json or add upcoming event entries.")
                 logger.warning("=" * 60)
 
+        # HMM Regime Classifier (global market state detection)
+        self.regime_classifier = RegimeClassifier(n_states=3)
+        self.current_hmm_regime: str = "unknown"
+        self._last_hmm_update: float = 0.0
+
         # Strategy instances
         self.mean_rev = MeanReversionStrategy()
         self.momentum = MomentumBreakoutStrategy()
@@ -126,6 +132,12 @@ class TradingEngine:
         self._position_state: dict[str, dict] = {}
         # Cycle level cached DataFrames to avoid redundant fetches
         self._cycle_dfs: dict[str, pd.DataFrame] = {}
+
+        # Initial HMM regime update at startup
+        try:
+            self._update_hmm_regime()
+        except Exception as exc:
+            logger.warning("Initial HMM regime update failed: %s", exc)
 
     # ──────────────────────────────────────────────────────────────────────
     # Public entry point
@@ -190,6 +202,9 @@ class TradingEngine:
         self._cycle_dfs = {}
         self.cycle_count += 1
         now = time.time()
+
+        # Refresh the HMM regime (rate-limited to once per day internally)
+        self._update_hmm_regime()
 
         # Let the AI tune the parameters before running the strategies
         self.ai_tuner.tune_parameters()
@@ -378,6 +393,50 @@ class TradingEngine:
                     elif routing == "REDUCED":
                         signal.confidence *= 0.5
 
+                # ── HMM Regime Gatekeeper ────────────────────────────────────
+                # Crisis override: block trend-following & momentum-breakout
+                if self.current_hmm_regime == "Bearish Volatile" and strategy.name in (
+                    "trend_following",
+                    "momentum_breakout",
+                ):
+                    hmm_reason = (
+                        f"HMM Regime blocked: {self.current_hmm_regime} "
+                        f"gate for {strategy.name}"
+                    )
+                    logger.info(
+                        "[HMM GATE] %s %s rejected — %s",
+                        signal.direction, signal.ticker, hmm_reason,
+                    )
+                    if self.trader:
+                        self.trader.record_virtual_trade(
+                            signal, hmm_reason, 1.0, self._get_signal_regime(ticker),
+                        )
+                    continue
+
+                # Bullish Calm: tighten mean-reversion criteria
+                if (
+                    self.current_hmm_regime == "Bullish Calm"
+                    and strategy.name == "mean_reversion"
+                ):
+                    if signal.confidence < 75.0 or signal.direction not in ("BUY",):
+                        hmm_reason = (
+                            f"HMM Regime blocked: {self.current_hmm_regime} "
+                            f"tightens mean reversion (conf={signal.confidence:.1f})"
+                        )
+                        logger.info(
+                            "[HMM GATE] %s %s rejected — %s",
+                            signal.direction, signal.ticker, hmm_reason,
+                        )
+                        if self.trader:
+                            self.trader.record_virtual_trade(
+                                signal, hmm_reason, 1.0,
+                                self._get_signal_regime(ticker),
+                            )
+                        continue
+                    # Even allowed signals get a confidence reduction in Bullish Calm
+                    signal.confidence *= 0.85
+                # ── End HMM Gatekeeper ───────────────────────────────────────
+
                 self.signals_today += 1
                 logger.info(
                     "[SIGNAL] %s %s | Conf: %.1f | %s",
@@ -445,11 +504,58 @@ class TradingEngine:
             self._log_status()
 
     # ──────────────────────────────────────────────────────────────────────
-    # Execute a signal through the risk + trading pipeline
+    # HMM Regime Management
     # ──────────────────────────────────────────────────────────────────────
 
+    def _update_hmm_regime(self) -> None:
+        """Fetch recent SPY data, update the HMM classifier, and store the
+        global market regime in ``self.current_hmm_regime``.
+
+        Downloads ~1 year of daily SPY data via ``yfinance``, fits (or
+        refits) the ``RegimeClassifier``, and records the latent state.
+
+        Called at startup and at most once per day thereafter.
+        """
+        import yfinance as yf
+
+        now = time.time()
+        # Rate-limit: only re-fit / predict once per 24 hours
+        if self._last_hmm_update > 0 and (now - self._last_hmm_update) < 86400:
+            logger.debug("HMM regime update skipped — last update was <24h ago")
+            return
+
+        try:
+            spy = yf.download(
+                "SPY", period="1y", interval="1d", progress=False, auto_adjust=True
+            )
+            if spy is None or spy.empty:
+                logger.warning("[HMM] Could not fetch SPY data for regime update")
+                return
+
+            # Fit on the latest data, then predict the current regime
+            self.regime_classifier.fit(spy)
+            label, state_id = self.regime_classifier.predict(spy)
+            self.current_hmm_regime = label
+            self._last_hmm_update = now
+            logger.info(
+                "[HMM] Regime updated: %s (state %d)", label, state_id
+            )
+        except Exception as exc:
+            logger.warning("[HMM] Regime update failed: %s", exc)
+
     def _get_signal_regime(self, ticker: str) -> str:
-        """Map a ticker to its current market regime from the AI Tuner."""
+        """Map a ticker to its current market regime.
+
+        Incorporates the HMM global regime as an override:
+          - If HMM detects ``"Bearish Volatile"`` it is returned immediately
+            (crisis state takes precedence over per-sector AI regimes).
+          - Otherwise delegates to the AI Tuner's sector regimes.
+        """
+        # HMM crisis override — Bearish Volatile trumps everything
+        if self.current_hmm_regime == "Bearish Volatile":
+            return self.current_hmm_regime
+
+        # Regular regime mapping from AI Tuner
         if ticker in ("SPY", "QQQ"):
             return self.ai_tuner.current_regimes.get("Equity", "unknown")
         elif ticker in ("BTC-USD", "BTCUSD"):

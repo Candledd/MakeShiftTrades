@@ -198,6 +198,7 @@ class MomentumBreakoutStrategy(BaseStrategy):
 
         high = df["High"].astype(float)
         low = df["Low"].astype(float)
+        open_p = df["Open"].astype(float)
         close = df["Close"].astype(float)
         volume = df["Volume"].astype(float)
 
@@ -340,6 +341,15 @@ class MomentumBreakoutStrategy(BaseStrategy):
             ):
                 divergence_penalty = 10
 
+        # ── VPIN (Volume-Synchronized Probability of Informed Trading) ──
+        vpin = self.compute_vpin(df, config.VPIN_WINDOW)
+        vpin_confirmed: bool = vpin > config.VPIN_MB_BOOST_THRESHOLD
+        if vpin_confirmed:
+            logger.debug(
+                "%s %s: VPIN = %.4f (>%.2f) — toxic order flow confirmation",
+                self.name, ticker, vpin, config.VPIN_MB_BOOST_THRESHOLD,
+            )
+
         # ── Confidence (0–100, capped at 90) ───────────────────────────
         confidence = 40  # base for valid compression + expansion
 
@@ -354,6 +364,10 @@ class MomentumBreakoutStrategy(BaseStrategy):
             confidence += 15
         elif current_volume_ratio > config.MB_MED_VOL_RATIO:
             confidence += 10
+
+        # VPIN toxicity confirmation — aggressive informed flow supports breakout
+        if vpin_confirmed:
+            confidence += 15
 
         # Clean break — price more than 0.5 % beyond the channel
         if direction == "BUY" and current_close > current_upper * 1.005:
@@ -392,6 +406,9 @@ class MomentumBreakoutStrategy(BaseStrategy):
             f"tp {config.MB_PARTIAL_TP_RISK_MULT:.1f}R partial + trail | "
             f"confidence {confidence}/90"
         )
+
+        if vpin_confirmed:
+            reason += " | VPIN Toxicity confirmation"
 
         # ── Record signal ─────────────────────────────────────────────
         self.record_signal(ticker)
