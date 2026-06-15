@@ -142,44 +142,10 @@ class TrendPullbackStrategy(BaseStrategy):
         poc_distance = abs(current_close - poc_price) / poc_price if poc_price > 0 else 0.0
         near_poc = poc_distance <= _VP_POC_DIST_PCT
 
-        # -- Entry logic (long only) ------------------------------------
-        #
-        # Two entry paths (either one suffices):
-        #
-        #   Path A — Classic Bollinger Band pullback (same as before)
-        #     1. Price at or below the lower Bollinger Band
-        #     2. RSI is weak but NOT collapsing (15–65)
-        #     3. Price is reclaiming the lower band (close back inside)
-        #     4. Volume is elevated (selling climax fading)
-        #
-        #   Path B — POC Distance + Node Breach (primary framework)
-        #     1. Distance to POC is within threshold (near the high-volume node)
-        #     2. Node Breach: price has breached below the POC or VA Low,
-        #        entering the discount / mean-reversion zone
-        #     3. RSI is weak but NOT collapsing (15–65)
-        #     4. Volume is elevated
-        #
-        # Path B uses POC "Distance to POC" and "Node Breach" as the primary
-        # decision criteria, reducing reliance on the Bollinger Band alone.
-        # ----------------------------------------------------------------
-
-        if htf_trend == "neutral":
-            at_lower_band = current_close <= current_lower * 1.002
-            volume_confirm = vol_ratio > 1.5
-        else:
-            at_lower_band = current_close <= current_lower * config.TP_PULLBACK_BUFFER
-            volume_confirm = vol_ratio > 1.0
-
-        rsi_weak_not_collapsing = 15.0 <= current_rsi <= 65.0
-        reclaiming_band = current_close > current_lower
-
-        # Path A: classic Bollinger Band pullback
-        path_a = at_lower_band and rsi_weak_not_collapsing and reclaiming_band and volume_confirm
-        # Path B: POC Distance + Node Breach framework
-        node_breach = current_close < va_low or current_close < poc_price
-        path_b = near_poc and node_breach and rsi_weak_not_collapsing and volume_confirm
-
-        if not (path_a or path_b):
+        # -- Simple pullback entry ---------------------------------------
+        # BUY if price pulls back below SMA20 (price mean-reverting within
+        # a bullish trend) and RSI is weak (< 50).
+        if not (current_close < current_sma20 and current_rsi < 50):
             return None
 
         direction: str = "BUY"
@@ -250,7 +216,7 @@ class TrendPullbackStrategy(BaseStrategy):
         confidence = min(90.0, confidence)
 
         # -- Reason -----------------------------------------------------
-        entry_path = "POC retest" if path_b and not path_a else "BB pullback + POC" if path_a and path_b else "BB pullback"
+        entry_path = "SMA20 pullback"
         reason = (
             f"Trend pullback {direction}: "
             f"{entry_path} in {htf_trend} HTF trend, "

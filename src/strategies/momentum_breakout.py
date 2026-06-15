@@ -264,17 +264,9 @@ class MomentumBreakoutStrategy(BaseStrategy):
             return None
 
 
-        # Breakout must have happened on the previous bar
-        prev_breakout_buy = close.iloc[-2] > upper_channel.iloc[-2]
-        prev_breakout_sell = close.iloc[-2] < lower_channel.iloc[-2]
-
-        # Current bar must hold the breakout (not close back inside the channel range)
-        # Inside the range means dropping back below upper_channel (for long)
-        current_hold_buy = current_close >= current_upper
-        current_hold_sell = current_close <= current_lower
-
-        is_buy = prev_breakout_buy and current_hold_buy
-        is_sell = prev_breakout_sell and current_hold_sell
+        # Immediate breakout trigger on current bar — no hold requirement
+        is_buy = current_close > current_upper
+        is_sell = current_close < current_lower
 
         if not (is_buy or is_sell):
             return None
