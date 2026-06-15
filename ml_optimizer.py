@@ -207,21 +207,21 @@ def run_backtest_session(configs_strat, is_oos_mode="IS", account_size=5000.0, r
 
 def objective(trial):
     mr_bb_std = trial.suggest_float("MR_BB_STD", 1.5, 3.0, step=0.1)
-    mr_rsi_oversold = trial.suggest_float("MR_RSI_OVERSOLD", 20.0, 40.0, step=1.0)
-    mr_rsi_overbought = trial.suggest_float("MR_RSI_OVERBOUGHT", 60.0, 80.0, step=1.0)
+    # mr_rsi_oversold = trial.suggest_float("MR_RSI_OVERSOLD", 20.0, 40.0, step=1.0)
+    # mr_rsi_overbought = trial.suggest_float("MR_RSI_OVERBOUGHT", 60.0, 80.0, step=1.0)
     tp_bb_std = trial.suggest_float("TP_BB_STD", 1.5, 3.0, step=0.1)
     mb_donchian_period = trial.suggest_int("MB_DONCHIAN_PERIOD", 36, 72)
     
     mr_stop_mult = trial.suggest_float("MR_STOP_MULT", 1.0, 4.0, step=0.1)
     tp_stop_mult = trial.suggest_float("TP_STOP_MULT", 1.0, 4.0, step=0.1)
-    tp_pullback_buffer = trial.suggest_float("TP_PULLBACK_BUFFER", 1.000, 1.050, step=0.001)
-    mb_adx_threshold = trial.suggest_float("MB_ADX_THRESHOLD", 15.0, 35.0, step=1.0)
+    # tp_pullback_buffer = trial.suggest_float("TP_PULLBACK_BUFFER", 1.000, 1.050, step=0.001)
+    # mb_adx_threshold = trial.suggest_float("MB_ADX_THRESHOLD", 15.0, 35.0, step=1.0)
     mr_bb_period = trial.suggest_int("MR_BB_PERIOD", 10, 40)
     mr_rsi_period = trial.suggest_int("MR_RSI_PERIOD", 5, 20)
     tp_bb_period = trial.suggest_int("TP_BB_PERIOD", 10, 40)
     mb_compression_threshold = trial.suggest_int("MB_COMPRESSION_THRESHOLD", 50, 65, step=5)
     
-    mr_tp_target_mult = trial.suggest_float("MR_TP_TARGET_MULT", 0.5, 2.5, step=0.1)
+    # mr_tp_target_mult = trial.suggest_float("MR_TP_TARGET_MULT", 0.5, 2.5, step=0.1)
     mr_min_rr = trial.suggest_float("MR_MIN_RR", 0.5, 2.5, step=0.1)
     tp_min_rr = trial.suggest_float("TP_MIN_RR", 0.8, 3.0, step=0.1)
 
@@ -231,21 +231,21 @@ def objective(trial):
     
     # Apply parameters to config
     config.MR_BB_STD = mr_bb_std
-    config.MR_RSI_OVERSOLD = mr_rsi_oversold
-    config.MR_RSI_OVERBOUGHT = mr_rsi_overbought
+    # config.MR_RSI_OVERSOLD = mr_rsi_oversold
+    # config.MR_RSI_OVERBOUGHT = mr_rsi_overbought
     config.TP_BB_STD = tp_bb_std
     config.MB_DONCHIAN_PERIOD = mb_donchian_period
     
     config.MR_STOP_MULT = mr_stop_mult
     config.TP_STOP_MULT = tp_stop_mult
-    config.TP_PULLBACK_BUFFER = tp_pullback_buffer
-    config.MB_ADX_THRESHOLD = mb_adx_threshold
+    # config.TP_PULLBACK_BUFFER = tp_pullback_buffer
+    # config.MB_ADX_THRESHOLD = mb_adx_threshold
     config.MR_BB_PERIOD = mr_bb_period
     config.MR_RSI_PERIOD = mr_rsi_period
     config.TP_BB_PERIOD = tp_bb_period
     config.MB_COMPRESSION_THRESHOLD = mb_compression_threshold
     
-    config.MR_TP_TARGET_MULT = mr_tp_target_mult
+    # config.MR_TP_TARGET_MULT = mr_tp_target_mult
     config.MR_MIN_RR = mr_min_rr
     config.TP_MIN_RR = tp_min_rr
 
@@ -369,20 +369,20 @@ def objective(trial):
 
 def evaluate_oos_params(best_params):
     config.MR_BB_STD = best_params.get("MR_BB_STD", config.MR_BB_STD)
-    config.MR_RSI_OVERSOLD = best_params.get("MR_RSI_OVERSOLD", config.MR_RSI_OVERSOLD)
-    config.MR_RSI_OVERBOUGHT = best_params.get("MR_RSI_OVERBOUGHT", config.MR_RSI_OVERBOUGHT)
+    # config.MR_RSI_OVERSOLD = best_params.get("MR_RSI_OVERSOLD", config.MR_RSI_OVERSOLD)
+    # config.MR_RSI_OVERBOUGHT = best_params.get("MR_RSI_OVERBOUGHT", config.MR_RSI_OVERBOUGHT)
     config.TP_BB_STD = best_params.get("TP_BB_STD", config.TP_BB_STD)
     config.MB_DONCHIAN_PERIOD = best_params.get("MB_DONCHIAN_PERIOD", config.MB_DONCHIAN_PERIOD)
     
     config.MR_STOP_MULT = best_params.get("MR_STOP_MULT", config.MR_STOP_MULT)
     config.TP_STOP_MULT = best_params.get("TP_STOP_MULT", config.TP_STOP_MULT)
-    config.TP_PULLBACK_BUFFER = best_params.get("TP_PULLBACK_BUFFER", config.TP_PULLBACK_BUFFER)
-    config.MB_ADX_THRESHOLD = best_params.get("MB_ADX_THRESHOLD", config.MB_ADX_THRESHOLD)
+    # config.TP_PULLBACK_BUFFER = best_params.get("TP_PULLBACK_BUFFER", config.TP_PULLBACK_BUFFER)
+    # config.MB_ADX_THRESHOLD = best_params.get("MB_ADX_THRESHOLD", config.MB_ADX_THRESHOLD)
     config.MR_BB_PERIOD = best_params.get("MR_BB_PERIOD", config.MR_BB_PERIOD)
     config.MR_RSI_PERIOD = best_params.get("MR_RSI_PERIOD", config.MR_RSI_PERIOD)
     config.TP_BB_PERIOD = best_params.get("TP_BB_PERIOD", config.TP_BB_PERIOD)
     config.MB_COMPRESSION_THRESHOLD = best_params.get("MB_COMPRESSION_THRESHOLD", config.MB_COMPRESSION_THRESHOLD)
-    config.MR_TP_TARGET_MULT = best_params.get("MR_TP_TARGET_MULT", config.MR_TP_TARGET_MULT)
+    # config.MR_TP_TARGET_MULT = best_params.get("MR_TP_TARGET_MULT", config.MR_TP_TARGET_MULT)
     config.MR_MIN_RR = best_params.get("MR_MIN_RR", config.MR_MIN_RR)
     config.TP_MIN_RR = best_params.get("TP_MIN_RR", config.TP_MIN_RR)
 
@@ -432,7 +432,7 @@ if __name__ == "__main__":
     print("Data loaded. Starting Optuna study...")
     
     study = optuna.create_study(
-        study_name="makeshift_trades_6mo_v4",
+        study_name="makeshift_trades_6mo_v5",
         storage="sqlite:///optuna_study.db?timeout=60",
         direction="maximize",
         load_if_exists=True
