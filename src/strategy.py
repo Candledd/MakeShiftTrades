@@ -64,7 +64,7 @@ SWEEP_LOOKBACK   = 10        # bars back to check for liquidity sweep
 MIN_FVG_SIZE_ATR = 0.1       # FVG must be at least 0.1× the current ATR
 MAX_FVG_SIZE_ATR = 3.0       # FVG larger than this is unreliable (too wide)
 MIN_CONFIDENCE   = 30.0      # minimum strategy confidence to even show the signal
-MIN_RR_HARD      = 1.5       # absolute minimum risk/reward
+MIN_RR_HARD      = 0.8       # absolute minimum risk/reward
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -44,6 +44,7 @@ trades_state_backup.json
 trade_feedback.jsonl
 .serena
 .opencode
+best_params.json
 .orchestration_plan.md
 session-ses_14d8.md
 claude.md

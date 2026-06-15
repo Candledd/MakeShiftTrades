@@ -64,7 +64,7 @@ CRYPTO_SYMBOLS: set = {"BTCUSD", "ETHUSD", "BCHUSD", "LTCUSD", "UNIUSD", "LINKUS
 INITIAL_CASH_LIMIT: float = 5_000.0
 
 # Minimum R/R the double-check validator enforces.
-MIN_RR_HARD: float = 1.0
+MIN_RR_HARD: float = 0.8
 
 # Maximum entry-vs-current-price deviation (%) before rejecting the order.
 MAX_ENTRY_DEVIATION_PCT: float = 2.0

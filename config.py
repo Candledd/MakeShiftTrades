@@ -428,11 +428,6 @@ except ValueError:
     raise ValueError("MB_SQUEEZE_KC_MULT must be a valid number")
 
 try:
-    MB_FALSE_BREAKOUT_BARS = int(os.getenv("MB_FALSE_BREAKOUT_BARS", "3"))
-except ValueError:
-    raise ValueError("MB_FALSE_BREAKOUT_BARS must be a valid integer")
-
-try:
     MB_MIN_VOLUME_RATIO = float(os.getenv("MB_MIN_VOLUME_RATIO", "0.1"))
 except ValueError:
     raise ValueError("MB_MIN_VOLUME_RATIO must be a valid number")
@@ -629,8 +624,6 @@ if TF_ADX_PERIOD < 2:
     raise ValueError(f"TF_ADX_PERIOD must be >= 2, got {TF_ADX_PERIOD}")
 if TF_RSI_PERIOD < 2:
     raise ValueError(f"TF_RSI_PERIOD must be >= 2, got {TF_RSI_PERIOD}")
-if MB_FALSE_BREAKOUT_BARS < 1:
-    raise ValueError(f"MB_FALSE_BREAKOUT_BARS must be >= 1, got {MB_FALSE_BREAKOUT_BARS}")
 if MB_RSI_PERIOD < 2:
     raise ValueError(f"MB_RSI_PERIOD must be >= 2, got {MB_RSI_PERIOD}")
 if MB_ATR_PERCENTILE_LOOKBACK < 10:

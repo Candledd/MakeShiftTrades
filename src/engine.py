@@ -683,6 +683,25 @@ class TradingEngine:
                 ml_agreement, slippage_penalty, composite_score,
             )
 
+            # 4. Append to the correct risk bucket
+            bucket_key = BUCKET_MAP.get(alpaca_ticker, "general")
+            scored_signals[bucket_key].append((composite_score, signal, df))
+
+        # 5. Select the highest-scoring signal from each bucket
+        result: list[tuple[StrategySignal, Optional[pd.DataFrame]]] = []
+        for bucket_key in ("equity_beta", "crypto", "gold", "broad_commodity", "general"):
+            bucket_entries = scored_signals.get(bucket_key, [])
+            if bucket_entries:
+                bucket_entries.sort(key=lambda x: x[0], reverse=True)
+                best_score, best_signal, best_df = bucket_entries[0]
+                logger.debug(
+                    "[RANK-SELECT] Bucket %s: selected %s %s (score: %+.4f)",
+                    bucket_key, best_signal.direction, best_signal.ticker, best_score,
+                )
+                result.append((best_signal, best_df))
+
+        return result
+
     @staticmethod
     def _calc_regime_fit_score(regime: str, strategy_name: str, direction: str) -> float:
         """Return a 0–1 score indicating how well *strategy* fits *regime*.
