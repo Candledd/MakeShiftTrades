@@ -291,10 +291,10 @@ def run_stateful_backtest(strategies_to_test: list, days_to_test: int, starting_
     # 5. Initialize RiskManager and simulation state
     # ════════════════════════════════════════════════════════════════════
     risk_manager = RiskManager(
-        max_risk_pct=0.01,
-        max_position_pct=0.20,
-        max_notional=10000.0,
-        max_positions=5,
+        max_risk_pct=0.04,
+        max_position_pct=5.00,
+        max_notional=50000.0,
+        max_positions=2,
     )
 
     account_equity = starting_equity

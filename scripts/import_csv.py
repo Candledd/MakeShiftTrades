@@ -4,7 +4,32 @@ from optuna.distributions import FloatDistribution, IntDistribution
 import os
 
 def migrate_csv_to_db():
-    csv_file = "optuna_trials_data.csv"
+    mode = input("Which version do you want to import? (ml / risk): ").strip().lower()
+    if mode == "ml":
+        study_name = "makeshift_trades_6mo_v5"
+        csv_file = "data/optuna_trials_ml.csv"
+        distributions = {
+            "MR_BB_STD": FloatDistribution(1.5, 3.0, step=0.1),
+            "TP_BB_STD": FloatDistribution(1.5, 3.0, step=0.1),
+            "MB_DONCHIAN_PERIOD": IntDistribution(36, 72),
+            "MR_BB_PERIOD": IntDistribution(10, 40),
+            "MR_RSI_PERIOD": IntDistribution(5, 20),
+            "TP_BB_PERIOD": IntDistribution(10, 40),
+            "MB_COMPRESSION_THRESHOLD": IntDistribution(50, 65, step=5)
+        }
+    else:
+        study_name = "makeshift_trades_risk_v1"
+        csv_file = "data/optuna_trials_risk.csv"
+        distributions = {
+            "MAX_POSITION_PCT": FloatDistribution(1.0, 10.0, step=0.5),
+            "MAX_RISK_PCT": FloatDistribution(0.01, 0.10, step=0.01),
+            "RISK_TIER_EQUITY_PCT": FloatDistribution(0.01, 0.10, step=0.01),
+            "TP_STOP_MULT": FloatDistribution(1.0, 3.0, step=0.1),
+            "TP_MIN_RR": FloatDistribution(1.0, 2.0, step=0.1),
+            "MR_STOP_MULT": FloatDistribution(1.0, 3.0, step=0.1),
+            "MR_MIN_RR": FloatDistribution(0.5, 2.0, step=0.1)
+        }
+
     if not os.path.exists(csv_file):
         print(f"File {csv_file} not found. Nothing to import.")
         return
@@ -16,29 +41,11 @@ def migrate_csv_to_db():
 
     # Create/load the study
     study = optuna.create_study(
-        study_name="makeshift_trades_optimization",
-        storage="sqlite:///optuna_study.db",
+        study_name=study_name,
+        storage="sqlite:///data/optuna_study.db",
         direction="maximize",
         load_if_exists=True
     )
-
-    # Distributions mapped exactly to ml_optimizer.py
-    distributions = {
-        "MR_BB_STD": FloatDistribution(1.5, 3.0, step=0.1),
-        "MR_RSI_OVERSOLD": FloatDistribution(20.0, 40.0, step=1.0),
-        "MR_RSI_OVERBOUGHT": FloatDistribution(60.0, 80.0, step=1.0),
-        "TP_BB_STD": FloatDistribution(1.5, 3.0, step=0.1),
-        "MB_DONCHIAN_PERIOD": IntDistribution(36, 72),
-        "MR_STOP_MULT": FloatDistribution(1.0, 4.0, step=0.1),
-        "TP_STOP_MULT": FloatDistribution(1.0, 4.0, step=0.1),
-        "TP_PULLBACK_BUFFER": FloatDistribution(1.000, 1.010, step=0.001),
-        "MB_ADX_THRESHOLD": FloatDistribution(15.0, 35.0, step=1.0),
-        "MR_BB_PERIOD": IntDistribution(10, 40),
-        "MR_RSI_PERIOD": IntDistribution(5, 20),
-        "TP_BB_PERIOD": IntDistribution(10, 40),
-        "MB_FALSE_BREAKOUT_BARS": IntDistribution(1, 5)
-    }
-
     trials_added = 0
     for _, row in df.iterrows():
         # Only import completed trials

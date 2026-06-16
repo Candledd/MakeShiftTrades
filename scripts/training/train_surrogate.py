@@ -9,9 +9,16 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score
 
 def train_surrogate():
-    csv_file = "optuna_trials_data.csv"
+    mode = input("Which version do you want to train the surrogate for? (ml / risk): ").strip().lower()
+    if mode == "ml":
+        csv_file = "data/optuna_trials_ml.csv"
+        out_json = "data/surrogate_top_5_ml.json"
+    else:
+        csv_file = "data/optuna_trials_risk.csv"
+        out_json = "data/surrogate_top_5_risk.json"
+
     if not os.path.exists(csv_file):
-        print(f"Error: {csv_file} not found. You need to run ml_optimizer.py first.")
+        print(f"Error: {csv_file} not found. Run the corresponding optimizer first.")
         return
 
     print("Loading overnight simulation data...")
@@ -107,10 +114,10 @@ def train_surrogate():
         clean_row = {k: v for k, v in row.to_dict().items() if not k.startswith("Predicted_") or k == "Predicted_PnL"}
         export_list.append(clean_row)
         
-    with open("surrogate_top_5.json", "w") as f:
+    with open(out_json, "w") as f:
         json.dump(export_list, f, indent=4)
         
-    print("\n-> Automatically exported these Top 5 predictions to 'surrogate_top_5.json'!")
+    print("\n-> Automatically exported these Top 5 predictions to '" + out_json + "'!")
     print("-> Run 'python verify_predictions.py' to backtest them instantly.")
 
 if __name__ == "__main__":

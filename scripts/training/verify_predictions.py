@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import timedelta
 import logging
 
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
 from dotenv import load_dotenv
 load_dotenv()
 import config
@@ -37,11 +37,16 @@ def simulate_trade(df, entry_idx, signal):
             if row['Low'] <= signal.take_profit: return 'TP', signal.take_profit
     return 'OPEN', future_df["Close"].iloc[-1] if len(future_df) > 0 else signal.entry
 
-from ml_optimizer import run_backtest_session
-import ml_optimizer
+from scripts.optimization.ml_optimizer import run_backtest_session
+from scripts.optimization import ml_optimizer
 
 def test_params(params):
     # Apply params
+    # Apply Risk params
+    config.MAX_POSITION_PCT = params.get("MAX_POSITION_PCT", getattr(config, 'MAX_POSITION_PCT', 5.0))
+    config.MAX_RISK_PCT = params.get("MAX_RISK_PCT", getattr(config, 'MAX_RISK_PCT', 0.04))
+    config.RISK_TIER_EQUITY_PCT = params.get("RISK_TIER_EQUITY_PCT", getattr(config, 'RISK_TIER_EQUITY_PCT', 0.04))
+
     config.MB_ADX_THRESHOLD = params.get("MB_ADX_THRESHOLD", config.MB_ADX_THRESHOLD)
     config.MB_DONCHIAN_PERIOD = int(params.get("MB_DONCHIAN_PERIOD", config.MB_DONCHIAN_PERIOD))
     config.MB_FALSE_BREAKOUT_BARS = int(params.get("MB_FALSE_BREAKOUT_BARS", getattr(config, "MB_FALSE_BREAKOUT_BARS", 5)))
@@ -77,23 +82,25 @@ def test_params(params):
 if __name__ == "__main__":
     import json
     
-    if not os.path.exists("surrogate_top_5.json"):
-        print("Error: 'surrogate_top_5.json' not found. Please run 'python train_surrogate.py' first!")
+    mode = input("Which version do you want to verify? (ml / risk): ").strip().lower()
+    if mode == "ml":
+        surrogate_file = "data/surrogate_top_5_ml.json"
+        best_params_file = "data/best_ml_params.json"
+    else:
+        surrogate_file = "data/surrogate_top_5_risk.json"
+        best_params_file = "data/best_risk_params.json"
+
+    if not os.path.exists(surrogate_file):
+        print(f"Error: '{surrogate_file}' not found. Please run 'python scripts/training/train_surrogate.py' first!")
         sys.exit(1)
         
-    with open("surrogate_top_5.json", "r") as f:
+    with open(surrogate_file, "r") as f:
         sets = json.load(f)
         
     print("Loading data for cache... (this takes a few seconds)")
-    ml_optimizer.load_data(months=6)
-    load_data()
     
-    print(f"\n{'Set':<8} | {'Predicted PnL':<15} | {'Actual PnL':<15} | {'Trades':<10}")
-    print("-" * 58)
-    
-    # 1. Test the current live parameters as a baseline
-    if os.path.exists("best_params.json"):
-        with open("best_params.json", "r") as f:
+    if os.path.exists(best_params_file):
+        with open(best_params_file, "r") as f:
             current_params = json.load(f)
         actual_pnl, trades = test_params(current_params)
         print(f"{'CURRENT':<8} | {'N/A':<15} | ${actual_pnl:<13.2f}  | {trades:<10}")
@@ -118,9 +125,9 @@ if __name__ == "__main__":
                 # Remove the prediction metadata before saving
                 clean_params = {k: v for k, v in selected_params.items() if k != "Predicted_PnL"}
                 
-                with open("best_params.json", "w") as f:
+                with open(best_params_file, "w") as f:
                     json.dump(clean_params, f, indent=4)
-                print(f"\nSUCCESS! Set #{choice_idx} has been permanently saved to best_params.json!")
+                print(f"\nSUCCESS! Set #{choice_idx} has been permanently saved to " + best_params_file + "!")
                 print("Your bot will now use these institutional-grade parameters.")
                 break
             else:

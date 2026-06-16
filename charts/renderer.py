@@ -5,9 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
 
-from .indicators.fvg import detect_fvg
 from .indicators.engulfing import detect_engulfing
-from .indicators.liquidity import detect_liquidity_levels
 from .indicators.price_action import (
     detect_swing_points,
     detect_market_structure,
@@ -77,11 +75,11 @@ def build_chart(
     """Build and return a Plotly Figure for `df`.
 
     `indicators` is a list of active layer keys:
-        'fvg', 'engulfing', 'liquidity', 'ob', 'ms', 'swings'
+        'engulfing', 'ob', 'ms', 'swings'
     All layers are active when `indicators` is None.
     """
     if indicators is None:
-        indicators = ["fvg", "engulfing", "liquidity", "ob", "ms", "swings"]
+        indicators = ["engulfing", "ob", "ms", "swings"]
     active = set(indicators)
 
     fig = go.Figure()
@@ -104,52 +102,6 @@ def build_chart(
             showlegend=True,
         )
     )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # 2. FVG / IFVG zones
-    # ─────────────────────────────────────────────────────────────────────────
-    if "fvg" in active:
-        fvg_df = detect_fvg(df)
-        if not fvg_df.empty:
-            # Show only the most recent FVGs
-            recent = fvg_df.tail(_MAX_FVG)
-            for _, row in recent.iterrows():
-                is_bull = row["type"] == "bullish"
-                if row["ifvg"]:
-                    fill  = C["ifvg_bull"] if is_bull else C["ifvg_bear"]
-                    dash  = "dot"
-                else:
-                    fill  = C["fvg_bull"] if is_bull else C["fvg_bear"]
-                    dash  = "solid"
-                border = C["fvg_bull_line"] if is_bull else C["fvg_bear_line"]
-                end_d  = row["end_date"] if row["active"] is False else last_date
-
-                fig.add_shape(
-                    type="rect",
-                    x0=_ts(row["date"]),
-                    x1=_ts(end_d),
-                    y0=row["bottom"],
-                    y1=row["top"],
-                    fillcolor=fill,
-                    line=dict(color=border, width=0.5, dash=dash),
-                    layer="below",
-                )
-
-            # Legend proxies
-            fig.add_trace(
-                go.Scatter(
-                    x=[None], y=[None], mode="markers",
-                    marker=dict(size=10, color=C["fvg_bull_line"], symbol="square", opacity=0.75),
-                    name="Bullish FVG (blue)",
-                )
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=[None], y=[None], mode="markers",
-                    marker=dict(size=10, color=C["fvg_bear_line"], symbol="square", opacity=0.75),
-                    name="Bearish FVG (amber)",
-                )
-            )
 
     # ─────────────────────────────────────────────────────────────────────────
     # 3. Liquidity Engulfing markers

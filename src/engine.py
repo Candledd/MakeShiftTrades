@@ -110,9 +110,9 @@ class TradingEngine:
             {"ticker": "SPY", "strategy": self.pullback, "interval_seconds": 900, "last_scan": 0},
             {"ticker": "QQQ", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
             {"ticker": "QQQ", "strategy": self.pullback, "interval_seconds": 900, "last_scan": 0},
-            {"ticker": "BTC-USD", "strategy": self.momentum, "interval_seconds": 3600, "last_scan": 0},
-            {"ticker": "GLD", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
-            {"ticker": "PDBC", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
+            # {"ticker": "BTC-USD", "strategy": self.momentum, "interval_seconds": 3600, "last_scan": 0},
+            # {"ticker": "GLD", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
+            # {"ticker": "PDBC", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
         ]
 
         # Save base intervals for adaptive scanning

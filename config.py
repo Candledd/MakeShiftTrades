@@ -1,5 +1,6 @@
 import os
 import threading
+import json
 from dotenv import load_dotenv
 
 # ── Global Config Lock for Thread Safety ───────────────────────────────────────
@@ -8,6 +9,29 @@ from dotenv import load_dotenv
 config_lock = threading.Lock()
 
 load_dotenv()
+
+BEST_PARAMS = {}
+
+# Load ML parameters
+if os.path.exists("data/best_ml_params.json"):
+    try:
+        with open("data/best_ml_params.json", "r") as f:
+            BEST_PARAMS.update(json.load(f))
+    except Exception:
+        pass
+
+# Load Risk parameters (these will overwrite ML if there are duplicates, though they shouldn't overlap anymore)
+if os.path.exists("data/best_risk_params.json"):
+    try:
+        with open("data/best_risk_params.json", "r") as f:
+            BEST_PARAMS.update(json.load(f))
+    except Exception:
+        pass
+
+def get_config_val(key, default):
+    if key in BEST_PARAMS:
+        return str(BEST_PARAMS[key])
+    return os.getenv(key, default)
 
 # ── Alpaca Paper Trading credentials ──────────────────────────────────────────
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
@@ -20,17 +44,17 @@ except ValueError:
     VIRTUAL_EQUITY = 0.0
 
 try:
-    MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "0.005"))
+    MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "0.04"))
 except ValueError:
     raise ValueError("MAX_RISK_PCT must be a valid number")
 
 try:
-    MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "1.00"))
+    MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "5.00"))
 except ValueError:
     raise ValueError("MAX_POSITION_PCT must be a valid number")
 
 try:
-    MAX_NOTIONAL = float(os.getenv("MAX_NOTIONAL", "100000"))
+    MAX_NOTIONAL = float(os.getenv("MAX_NOTIONAL", "50000"))
 except ValueError:
     raise ValueError("MAX_NOTIONAL must be a valid number")
 
@@ -40,22 +64,22 @@ except ValueError:
     raise ValueError("MAX_POSITIONS must be a valid integer")
 
 try:
-    MAX_OPEN_PORTFOLIO_RISK_PCT = float(os.getenv("MAX_OPEN_PORTFOLIO_RISK_PCT", "0.02"))
+    MAX_OPEN_PORTFOLIO_RISK_PCT = float(os.getenv("MAX_OPEN_PORTFOLIO_RISK_PCT", "0.25"))
 except ValueError:
     raise ValueError("MAX_OPEN_PORTFOLIO_RISK_PCT must be a valid number")
 
 try:
-    MAX_CLUSTER_RISK_PCT = float(os.getenv("MAX_CLUSTER_RISK_PCT", "0.01"))
+    MAX_CLUSTER_RISK_PCT = float(os.getenv("MAX_CLUSTER_RISK_PCT", "0.25"))
 except ValueError:
     raise ValueError("MAX_CLUSTER_RISK_PCT must be a valid number")
 
 try:
-    MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", "-0.015"))
+    MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", "-0.05"))
 except ValueError:
     raise ValueError("MAX_DAILY_LOSS_PCT must be a valid number")
 
 try:
-    MAX_WEEKLY_LOSS_PCT = float(os.getenv("MAX_WEEKLY_LOSS_PCT", "-0.04"))
+    MAX_WEEKLY_LOSS_PCT = float(os.getenv("MAX_WEEKLY_LOSS_PCT", "-0.12"))
 except ValueError:
     raise ValueError("MAX_WEEKLY_LOSS_PCT must be a valid number")
 
@@ -102,7 +126,7 @@ except ValueError:
 # ── Tiered Risk Per Asset Class ──────────────────────────────────────────────
 # These override MAX_RISK_PCT when a ticker matches the corresponding asset set.
 try:
-    RISK_TIER_EQUITY_PCT = float(os.getenv("RISK_TIER_EQUITY_PCT", "0.0025"))
+    RISK_TIER_EQUITY_PCT = float(os.getenv("RISK_TIER_EQUITY_PCT", "0.04"))
 except ValueError:
     raise ValueError("RISK_TIER_EQUITY_PCT must be a valid number")
 
@@ -197,7 +221,7 @@ except ValueError:
     raise ValueError("TP_BB_STD must be a valid number")
 
 try:
-    TP_STOP_MULT = float(os.getenv("TP_STOP_MULT", "3.9597"))
+    TP_STOP_MULT = float(os.getenv("TP_STOP_MULT", "1.5"))
 except ValueError:
     raise ValueError("TP_STOP_MULT must be a valid number")
 
@@ -217,7 +241,7 @@ except ValueError:
     raise ValueError("MR_MIN_RR must be a valid number")
 
 try:
-    TP_MIN_RR = float(os.getenv("TP_MIN_RR", "2.6153"))
+    TP_MIN_RR = float(os.getenv("TP_MIN_RR", "1.2"))
 except ValueError:
     raise ValueError("TP_MIN_RR must be a valid number")
 

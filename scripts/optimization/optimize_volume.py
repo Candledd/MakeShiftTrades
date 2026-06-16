@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import timedelta
 import logging
 
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
 import config
 
 from src.strategies.mean_reversion import MeanReversionStrategy

@@ -24,7 +24,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("bot_overnight_telemetry.log", encoding="utf-8")
+        logging.FileHandler("data/bot_overnight_telemetry.log", encoding="utf-8")
     ]
 )
 
@@ -49,9 +49,7 @@ logging.getLogger().addHandler(deque_handler)
 
 from charts.data import fetch_ohlcv
 from charts.renderer import build_chart
-from charts.indicators.fvg import detect_fvg
 from charts.indicators.engulfing import detect_engulfing
-from charts.indicators.liquidity import detect_liquidity_levels
 from charts.indicators.price_action import (
     detect_swing_points,
     detect_market_structure,
@@ -75,17 +73,17 @@ _werkzeug_log.setLevel(_logging.ERROR)
 # All /api/* routes require a valid API key passed via the X-API-Key header.
 # Set API_KEY in your .env file or environment. If unset, a mock key is used
 # for local development; change this before deploying to production.
-API_KEY = os.getenv("API_KEY")
-if not API_KEY:
-    raise ValueError("API_KEY environment variable is required")
+API_KEY = os.getenv("API_KEY", "")
+# if not API_KEY:
+#     raise ValueError("API_KEY environment variable is required")
 
 @app.before_request
 def _require_api_key():
     if not request.path.startswith("/api/"):
         return None
     key = request.headers.get("X-API-Key", "")
-    if key != API_KEY:
-        return jsonify({"ok": False, "error": "Unauthorized — missing or invalid API key."}), 401
+    if API_KEY and key != API_KEY:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
 
 TICKERS = ["NQ=F", "ES=F", "YM=F", "RTY=F", "SPY", "QQQ", "AAPL", "TSLA", "GC=F", "CL=F", "BTC-USD", "ETH-USD"]
 
@@ -144,7 +142,7 @@ def _to_ts(ts) -> int:
 
 @app.route("/")
 def index():
-    return render_template("index.html", tickers=TICKERS)
+    return render_template("index.html", tickers=["SPY", "QQQ"])
 
 
 # ── Candles API ───────────────────────────────────────────────────────────────
@@ -184,27 +182,13 @@ def api_indicators():
     ticker   = request.args.get("ticker",     "SPY").strip().upper()
     interval = request.args.get("interval",   "1m")
     period   = request.args.get("period",     "5d")
-    raw_ind  = request.args.get("indicators", "fvg,engulfing,liquidity,ob,ms,swings")
+    raw_ind  = request.args.get("indicators", "engulfing,ob,ms,swings")
     active   = {i.strip() for i in raw_ind.split(",") if i.strip()}
 
     try:
         df      = fetch_ohlcv(ticker, period=period, interval=interval)
         last_ts = _to_ts(df.index[-1])
         result: dict = {}
-
-        if "fvg" in active:
-            fvg_df = detect_fvg(df)
-            result["fvg"] = [
-                {
-                    "type":       row["type"],
-                    "ifvg":       bool(row["ifvg"]),
-                    "top":        float(row["top"]),
-                    "bottom":     float(row["bottom"]),
-                    "start_time": _to_ts(row["date"]),
-                    "end_time":   last_ts if row["active"] else _to_ts(row["end_date"]),
-                }
-                for _, row in fvg_df.tail(60).iterrows()
-            ]
 
         if "engulfing" in active:
             eng_df = detect_engulfing(df)
@@ -216,25 +200,6 @@ def api_indicators():
                 }
                 for _, row in eng_df.iterrows()
             ]
-
-        if "liquidity" in active:
-            levels = detect_liquidity_levels(df)
-            seen: set = set()
-            liq: list = []
-            for lv in levels:
-                if lv["strength"] < 3:
-                    continue
-                key = round(lv["price"], 1)
-                if key in seen:
-                    continue
-                seen.add(key)
-                liq.append({
-                    "price":      float(lv["price"]),
-                    "dir":        lv["dir"],
-                    "strength":   lv["strength"],
-                    "start_time": _to_ts(lv["date"]),
-                })
-            result["liquidity"] = liq
 
         if "ob" in active:
             obs = detect_order_blocks(df)
@@ -300,7 +265,7 @@ def api_chart():
     ticker    = request.args.get("ticker",     "SPY").strip().upper()
     interval  = request.args.get("interval",   "5m")
     period    = request.args.get("period",     "1mo")
-    raw_ind   = request.args.get("indicators", "fvg,engulfing,liquidity,ob,ms,swings")
+    raw_ind   = request.args.get("indicators", "engulfing,ob,ms,swings")
     indicators = [i.strip() for i in raw_ind.split(",") if i.strip()]
 
     try:
@@ -318,205 +283,6 @@ def api_chart():
 
 
 # ── Signal API ─────────────────────────────────────────────────────────────────
-
-@app.route("/api/signal")
-def api_signal():
-    """
-    Returns the combined SMC + ML trade signal for the requested ticker.
-
-    Pipeline
-    --------
-      1. SMCStrategy.analyze()  — strict SMC setup (sweep + CHoCH + FVG + OB)
-      2. SMCStrategy.find_setup() — pending levels for UI display
-      3. ML.evaluate_signal()   — Veto Filter on the SMC signal
-      4. Combine → final signal + confidence + alignment
-
-    Response JSON keys:
-      ok, ticker, signal, confidence, alignment,
-      ml  : { signal, confidence, probabilities, trained },
-      smc : { signal, entry, stop_loss, take_profit, risk_reward,
-              confidence, reason, smc_score }
-    """
-    ticker   = request.args.get("ticker",   "SPY").strip().upper()
-    interval = request.args.get("interval", "1m")
-    period   = request.args.get("period",   "5d")
-
-    try:
-        df = fetch_ohlcv(ticker, period=period, interval=interval)
-
-        # ── SMC signal ──────────────────────────────────────────────
-        from src.strategy import SMCStrategy
-        strategy     = SMCStrategy(ticker, interval=interval, period=period)
-        strict_sig   = strategy.analyze(df)
-        pending_sig  = strategy.find_setup(df)
-        smc_signal   = strict_sig or pending_sig
-
-        smc_dir = smc_signal.direction if smc_signal else None
-
-        # ── SMC score (0–6) mapped from strategy confidence ─────────
-        strategy_conf = smc_signal.confidence if smc_signal else 0.0
-        if strategy_conf >= 80:
-            smc_score = 6
-        elif strategy_conf >= 60:
-            smc_score = 5
-        elif strategy_conf >= 50:
-            smc_score = 4
-        elif strategy_conf >= 40:
-            smc_score = 3
-        elif strategy_conf >= 25:
-            smc_score = 2
-        elif strategy_conf >= 1:
-            smc_score = 1
-        else:
-            smc_score = 0
-
-        smc_block = {
-            "signal":        smc_dir,
-            "entry":         smc_signal.entry       if smc_signal else None,
-            "stop_loss":     smc_signal.stop_loss   if smc_signal else None,
-            "take_profit":   smc_signal.take_profit if smc_signal else None,
-            "risk_reward":   smc_signal.risk_reward if smc_signal else None,
-            "confidence":    strategy_conf,
-            "reason":        smc_signal.reason      if smc_signal else None,
-            "smc_score":     smc_score,
-            "price_at_zone": strict_sig is not None,
-        }
-
-        # ── Combine SMC + ML Veto Filter ────────────────────────────
-        if strict_sig is not None and smc_dir:
-            # We have a real SMC setup — run the ML Veto Filter
-            ml_eval = _get_ml_model().evaluate_signal(df, smc_dir)
-
-            if ml_eval["veto"]:
-                # ML says this setup is unlikely to succeed — block the trade
-                final_signal = "HOLD"
-                final_conf   = strategy_conf * 0.5  # mark confidence down
-                alignment    = "disagreement"
-            else:
-                # ML confirms the setup — blend confidences
-                final_signal = smc_dir
-                final_conf   = min(95.0, (strategy_conf + ml_eval["confidence"]) / 2)
-                alignment    = "aligned"
-
-            # Prepare ml block for frontend display
-            ml_result = {
-                "signal":        final_signal,
-                "confidence":    round(ml_eval["confidence"], 1),
-                "probabilities": ml_eval["details"],
-                "trained":       ml_eval["trained"],
-                "training":      ml_eval["training"],
-            }
-
-        elif pending_sig is not None:
-            # No strict SMC setup, but there's a pending setup for UI
-            final_signal = "HOLD"
-            final_conf   = strategy_conf * 0.6  # low — pending only
-            alignment    = "pending"
-            ml_result    = _get_ml_model().predict(df)
-
-        else:
-            # No SMC signal at all — fall back to ML standalone
-            ml_result = _get_ml_model().predict(df)
-            final_signal = ml_result["signal"]
-            final_conf   = ml_result["confidence"]
-            alignment    = "ml_only"
-
-        return jsonify({
-            "ok":         True,
-            "ticker":     ticker,
-            "signal":     final_signal,
-            "confidence": round(final_conf, 1),
-            "alignment":  alignment,
-            "ml":         ml_result,
-            "smc":        smc_block,
-        })
-
-    except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
-    except Exception as exc:
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": f"Server error: {exc}"}), 500
-
-
-# ── Multi-Timeframe Consensus API ─────────────────────────────────────────────
-
-@app.route("/api/mtf_signal")
-def api_mtf_signal():
-    """
-    Multi-timeframe consensus signal.
-
-    Query params: ticker, interval
-    Response JSON keys:
-      ok, ticker, consensus, consensus_score, long_pct, short_pct,
-      entry, stop_loss, take_profit, risk_reward, entry_tf, target_tf,
-      timeframes : { "1m": {...}, "3m": {...}, "5m": {...}, "15m": {...} }
-    """
-    ticker   = request.args.get("ticker",   "SPY").strip().upper()
-    interval = request.args.get("interval", "1m")
-
-    try:
-        from src.mtf import MultiTimeframeAnalysis
-        import config as _cfg
-        mtf    = MultiTimeframeAnalysis(ticker, active_interval=interval, ms_term=_cfg.MTF_MS_TERM, min_rr=_cfg.MTF_MIN_RR)
-        result = mtf.analyze()
-
-        return jsonify({
-            "ok":              True,
-            "ticker":          ticker,
-            "consensus":       result.consensus,
-            "consensus_score": result.consensus_score,
-            "long_pct":        result.long_pct,
-            "short_pct":       result.short_pct,
-            "entry":           result.entry,
-            "stop_loss":       result.stop_loss,
-            "take_profit":     result.take_profit,
-            "risk_reward":     result.risk_reward,
-            "entry_tf":        result.entry_tf,
-            "target_tf":       result.target_tf,
-            "timeframes":      result.timeframes,
-        })
-
-    except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
-    except Exception as exc:
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": f"Server error: {exc}"}), 500
-
-
-# ── Alpaca Paper Trading API ──────────────────────────────────────────────────
-#
-# Lazy-initialised singleton so the server starts even if ALPACA_* env vars
-# are absent (the routes return a clear error in that case).
-# ─────────────────────────────────────────────────────────────────────────────
-
-_alpaca_trader = None
-_alpaca_init_error: str = ""
-_alpaca_lock = threading.Lock()
-
-
-def _get_alpaca():
-    """Return the AlpacaTrader singleton, initialising on first call."""
-    global _alpaca_trader, _alpaca_init_error
-    if _alpaca_trader is not None:
-        return _alpaca_trader
-
-    with _alpaca_lock:
-        if _alpaca_trader is not None:
-            return _alpaca_trader
-        try:
-            from src.alpaca_trader import AlpacaTrader
-
-            _alpaca_trader = AlpacaTrader()
-            _alpaca_init_error = ""
-        except Exception as exc:
-            _alpaca_init_error = str(exc)
-            logging.getLogger(__name__).error("AlpacaTrader init failed: %s", exc)
-            _alpaca_trader = None
-    return _alpaca_trader
-
-
-threading.Thread(target=_bg_trade_feedback, daemon=True).start()
-
 
 @app.route("/api/paper/account")
 def api_paper_account():

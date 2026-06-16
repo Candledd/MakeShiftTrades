@@ -331,8 +331,8 @@ class RiskManager:
         if signal_regime == "Bearish Volatile":
             adaptive_risk_pct *= 0.50  # Cap nominal exposure at 50% in panic regimes
             
-        # Enforce absolute 1% maximum hard limit regardless of multipliers
-        adaptive_risk_pct = min(adaptive_risk_pct, 0.01)
+        # Enforce absolute 4% maximum hard limit regardless of multipliers
+        adaptive_risk_pct = min(adaptive_risk_pct, 0.04)
 
         risk_dollars = account_equity * adaptive_risk_pct
 

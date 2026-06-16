@@ -45,8 +45,6 @@ import pandas as pd
 
 from charts.data import fetch_ohlcv
 from charts.indicators.engulfing import detect_engulfing
-from charts.indicators.fvg import detect_fvg
-from charts.indicators.liquidity import detect_liquidity_levels
 from charts.indicators.price_action import (
     detect_market_structure,
     detect_order_blocks,
@@ -128,38 +126,6 @@ def _make_trend_series(
     bos20   = pd.Series(bos_pt,   index=df.index).rolling(20, min_periods=1).sum().to_numpy()
     choch20 = pd.Series(choch_pt, index=df.index).rolling(20, min_periods=1).sum().to_numpy()
     return trend, bos20, choch20
-
-
-def _make_fvg_features(
-    df: pd.DataFrame, fvg_df: pd.DataFrame
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    n      = len(df)
-    closes = df["Close"].to_numpy()
-    bull_active = np.zeros(n, dtype=np.float32)
-    bear_active = np.zeros(n, dtype=np.float32)
-    bull_cnt    = np.zeros(n, dtype=np.float32)
-    bear_cnt    = np.zeros(n, dtype=np.float32)
-    if fvg_df.empty:
-        return bull_active, bear_active, bull_cnt, bear_cnt
-    for _, row in fvg_df.iterrows():
-        start = int(row["origin_idx"])
-        try:
-            end_bar = df.index.get_loc(row["end_date"])
-        except KeyError:
-            end_bar = int(df.index.searchsorted(row["end_date"]))
-        top    = float(row["top"])
-        bottom = float(row["bottom"])
-        is_bull = row["type"] == "bullish"
-        for i in range(start, min(int(end_bar) + 1, n)):
-            if is_bull:
-                bull_cnt[i] += 1.0
-                if bottom <= closes[i] <= top:
-                    bull_active[i] = 1.0
-            else:
-                bear_cnt[i] += 1.0
-                if bottom <= closes[i] <= top:
-                    bear_active[i] = 1.0
-    return bull_active, bear_active, bull_cnt, bear_cnt
 
 
 def _make_ob_features(df: pd.DataFrame, obs: list[dict]) -> tuple[np.ndarray, np.ndarray]:
@@ -297,10 +263,8 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # ── SMC indicators ────────────────────────────────────────────────
     ms_events = detect_market_structure(df, term="intermediate")
-    fvg_df    = detect_fvg(df)
     obs       = detect_order_blocks(df, term="intermediate")
     engulf_df = detect_engulfing(df)
-    levels    = detect_liquidity_levels(df)
 
     trend_arr, bos_arr, choch_arr = _make_trend_series(df, ms_events)
 
@@ -312,8 +276,6 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
         trend_age[i] = float(i - last_flip)
     trend_age_norm = np.minimum(trend_age / 50.0, 1.0)
 
-    bull_fvg_active, bear_fvg_active, bull_fvg_cnt, bear_fvg_cnt = \
-        _make_fvg_features(df, fvg_df)
     bull_ob, bear_ob           = _make_ob_features(df, obs)
     bull_engulf, bear_engulf   = _make_engulf_features(df, engulf_df)
     liq_high_atr, liq_low_atr  = _make_liq_features(df, levels)
@@ -338,10 +300,6 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
         "trend_age_norm":  trend_age_norm,
         "bos_cnt20":       bos_arr,
         "choch_cnt20":     choch_arr,
-        "bull_fvg_active": bull_fvg_active,
-        "bear_fvg_active": bear_fvg_active,
-        "bull_fvg_cnt":    bull_fvg_cnt,
-        "bear_fvg_cnt":    bear_fvg_cnt,
         "bull_ob":         bull_ob,
         "bear_ob":         bear_ob,
         "bull_engulf":     bull_engulf,

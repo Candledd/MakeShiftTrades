@@ -7,7 +7,7 @@ import json
 import optuna
 
 # Ensure src is accessible
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -212,8 +212,6 @@ def objective(trial):
     tp_bb_std = trial.suggest_float("TP_BB_STD", 1.5, 3.0, step=0.1)
     mb_donchian_period = trial.suggest_int("MB_DONCHIAN_PERIOD", 36, 72)
     
-    mr_stop_mult = trial.suggest_float("MR_STOP_MULT", 1.0, 4.0, step=0.1)
-    tp_stop_mult = trial.suggest_float("TP_STOP_MULT", 1.0, 4.0, step=0.1)
     # tp_pullback_buffer = trial.suggest_float("TP_PULLBACK_BUFFER", 1.000, 1.050, step=0.001)
     # mb_adx_threshold = trial.suggest_float("MB_ADX_THRESHOLD", 15.0, 35.0, step=1.0)
     mr_bb_period = trial.suggest_int("MR_BB_PERIOD", 10, 40)
@@ -222,8 +220,6 @@ def objective(trial):
     mb_compression_threshold = trial.suggest_int("MB_COMPRESSION_THRESHOLD", 50, 65, step=5)
     
     # mr_tp_target_mult = trial.suggest_float("MR_TP_TARGET_MULT", 0.5, 2.5, step=0.1)
-    mr_min_rr = trial.suggest_float("MR_MIN_RR", 0.5, 2.5, step=0.1)
-    tp_min_rr = trial.suggest_float("TP_MIN_RR", 0.8, 3.0, step=0.1)
 
     # tf_ema_fast = trial.suggest_int("TF_EMA_FAST", 10, 25)
     # tf_ema_slow = trial.suggest_int("TF_EMA_SLOW", 40, 60)
@@ -236,8 +232,6 @@ def objective(trial):
     config.TP_BB_STD = tp_bb_std
     config.MB_DONCHIAN_PERIOD = mb_donchian_period
     
-    config.MR_STOP_MULT = mr_stop_mult
-    config.TP_STOP_MULT = tp_stop_mult
     # config.TP_PULLBACK_BUFFER = tp_pullback_buffer
     # config.MB_ADX_THRESHOLD = mb_adx_threshold
     config.MR_BB_PERIOD = mr_bb_period
@@ -246,8 +240,6 @@ def objective(trial):
     config.MB_COMPRESSION_THRESHOLD = mb_compression_threshold
     
     # config.MR_TP_TARGET_MULT = mr_tp_target_mult
-    config.MR_MIN_RR = mr_min_rr
-    config.TP_MIN_RR = tp_min_rr
 
     # config.GLD_EMA_FAST = tf_ema_fast
     # config.PDBC_EMA_FAST = tf_ema_fast
@@ -374,8 +366,6 @@ def evaluate_oos_params(best_params):
     config.TP_BB_STD = best_params.get("TP_BB_STD", config.TP_BB_STD)
     config.MB_DONCHIAN_PERIOD = best_params.get("MB_DONCHIAN_PERIOD", config.MB_DONCHIAN_PERIOD)
     
-    config.MR_STOP_MULT = best_params.get("MR_STOP_MULT", config.MR_STOP_MULT)
-    config.TP_STOP_MULT = best_params.get("TP_STOP_MULT", config.TP_STOP_MULT)
     # config.TP_PULLBACK_BUFFER = best_params.get("TP_PULLBACK_BUFFER", config.TP_PULLBACK_BUFFER)
     # config.MB_ADX_THRESHOLD = best_params.get("MB_ADX_THRESHOLD", config.MB_ADX_THRESHOLD)
     config.MR_BB_PERIOD = best_params.get("MR_BB_PERIOD", config.MR_BB_PERIOD)
@@ -383,8 +373,6 @@ def evaluate_oos_params(best_params):
     config.TP_BB_PERIOD = best_params.get("TP_BB_PERIOD", config.TP_BB_PERIOD)
     config.MB_COMPRESSION_THRESHOLD = best_params.get("MB_COMPRESSION_THRESHOLD", config.MB_COMPRESSION_THRESHOLD)
     # config.MR_TP_TARGET_MULT = best_params.get("MR_TP_TARGET_MULT", config.MR_TP_TARGET_MULT)
-    config.MR_MIN_RR = best_params.get("MR_MIN_RR", config.MR_MIN_RR)
-    config.TP_MIN_RR = best_params.get("TP_MIN_RR", config.TP_MIN_RR)
 
     # if "TF_EMA_FAST" in best_params:
     #     config.GLD_EMA_FAST = int(best_params["TF_EMA_FAST"])
@@ -432,7 +420,7 @@ if __name__ == "__main__":
     print("Data loaded. Starting Optuna study...")
     
     study = optuna.create_study(
-        study_name="makeshift_trades_6mo_v5",
+        study_name="makeshift_trades_6mo_v6",
         storage="sqlite:///optuna_study.db?timeout=60",
         direction="maximize",
         load_if_exists=True
@@ -465,13 +453,13 @@ if __name__ == "__main__":
     print("=" * 50)
     
     try:
-        with open("best_params.json", "w") as f:
+        with open("data/best_ml_params.json", "w") as f:
             json.dump(best_params, f, indent=4)
             
         df_trials = study.trials_dataframe()
-        df_trials.to_csv("optuna_trials_data.csv", index=False)
+        df_trials.to_csv("data/optuna_trials_ml.csv", index=False)
             
-        print("Saved best parameters to best_params.json")
+        print("Saved best parameters to data/best_ml_params.json")
         print(f"Saved ALL {len(df_trials)} historical trial data to optuna_trials_data.csv for your analysis.")
     except PermissionError:
         print("Another terminal is currently saving the CSV/JSON files. Skipping file export in this terminal to prevent crashes.")

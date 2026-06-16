@@ -155,8 +155,9 @@ class TrendPullbackStrategy(BaseStrategy):
         order_type = "MARKET"
         stop_loss = self.compute_stop_loss(entry, direction, atr=atr_val)
 
-        # Take-profit: the higher of VWAP, SMA20, and Value Area High
-        take_profit = max(current_vwap, current_sma20, va_high)
+        # Take-profit: the higher of VWAP, SMA20, Value Area High, and 2.0× ATR extension
+        # The ATR-based target ensures winners have room to run past the initial resistance.
+        take_profit = max(current_vwap, current_sma20, va_high, entry + 2.0 * atr_val)
         
         if take_profit <= entry:
             logger.debug("%s %s: inverted TP/Entry (TP=%.2f <= Entry=%.2f)", self.name, ticker, take_profit, entry)
@@ -172,8 +173,8 @@ class TrendPullbackStrategy(BaseStrategy):
             )
             return None
 
-        # -- Confidence (0–90) ------------------------------------------
-        confidence = 40.0
+        # -- Confidence (0–95) ------------------------------------------
+        confidence = 50.0
 
         # Ideal RSI zone
         if 35.0 <= current_rsi <= 45.0:
@@ -213,7 +214,7 @@ class TrendPullbackStrategy(BaseStrategy):
         elif htf_trend == "neutral":
             confidence *= 0.5
 
-        confidence = min(90.0, confidence)
+        confidence = min(95.0, confidence)
 
         # -- Reason -----------------------------------------------------
         entry_path = "SMA20 pullback"
