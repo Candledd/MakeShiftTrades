@@ -170,27 +170,6 @@ def _make_engulf_features(df: pd.DataFrame, engulf_df: pd.DataFrame) -> tuple[np
     return bull, bear
 
 
-def _make_liq_features(df: pd.DataFrame, levels: list[dict]) -> tuple[np.ndarray, np.ndarray]:
-    n      = len(df)
-    closes = df["Close"].to_numpy()
-    atr_arr = _atr(df["High"], df["Low"], df["Close"]).to_numpy()
-    liq_high = np.full(n, 10.0, dtype=np.float32)
-    liq_low  = np.full(n, 10.0, dtype=np.float32)
-    if not levels:
-        return liq_high, liq_low
-    high_prices = np.array([l["price"] for l in levels if l["dir"] == "high"])
-    low_prices  = np.array([l["price"] for l in levels if l["dir"] == "low"])
-    for i in range(n):
-        c   = closes[i]
-        atr = float(atr_arr[i]) if (not np.isnan(atr_arr[i]) and atr_arr[i] > 0) else 1.0
-        if len(high_prices):
-            above = high_prices[high_prices > c]
-            liq_high[i] = float((above.min() - c) / atr) if len(above) else 10.0
-        if len(low_prices):
-            below = low_prices[low_prices < c]
-            liq_low[i] = float((c - below.max()) / atr) if len(below) else 10.0
-    return np.clip(liq_high, 0, 20), np.clip(liq_low, 0, 20)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Full feature matrix
@@ -202,10 +181,8 @@ FEATURE_NAMES = [
     "ret1", "volatility20", "sma20_dist", "range_atr", "atr_slope5",
     "volatility_regime", "momentum_consistency", "volume_shock",
     "trend", "trend_age_norm", "bos_cnt20", "choch_cnt20",
-    "bull_fvg_active", "bear_fvg_active", "bull_fvg_cnt", "bear_fvg_cnt",
     "bull_ob", "bear_ob",
-    "bull_engulf", "bear_engulf",
-    "liq_high_atr", "liq_low_atr",
+    "bull_engulf", "bear_engulf"
 ]
 
 
@@ -278,7 +255,7 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
 
     bull_ob, bear_ob           = _make_ob_features(df, obs)
     bull_engulf, bear_engulf   = _make_engulf_features(df, engulf_df)
-    liq_high_atr, liq_low_atr  = _make_liq_features(df, levels)
+    
 
     return pd.DataFrame({
         "rsi14":           rsi14,
@@ -304,8 +281,6 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
         "bear_ob":         bear_ob,
         "bull_engulf":     bull_engulf,
         "bear_engulf":     bear_engulf,
-        "liq_high_atr":    liq_high_atr,
-        "liq_low_atr":     liq_low_atr,
     }, index=df.index)
 
 

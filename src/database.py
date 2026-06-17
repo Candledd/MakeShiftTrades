@@ -192,3 +192,6 @@ def get_realized_pnl(days: int) -> float:
     ).fetchone()
 
     return row["total"]
+
+# Automatically initialize the DB on import
+init_db()

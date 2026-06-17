@@ -90,7 +90,7 @@ def _fix_flat_ohlcv(df: pd.DataFrame, ticker: str = "", interval: str = "") -> p
 
 
 
-def fetch_ohlcv(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
+def fetch_ohlcv(ticker: str, period: str = "6mo", interval: str = "1d", end_date: str = None) -> pd.DataFrame:
     """Download OHLCV bars using the Alpaca market data API.
 
     Parameters
@@ -137,7 +137,11 @@ def fetch_ohlcv(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.Da
         except ValueError:
             pass
 
-    start = datetime.now(timezone.utc) - timedelta(days=days)
+    if end_date is None:
+        end = datetime.now(timezone.utc)
+    else:
+        end = pd.to_datetime(end_date).tz_localize("UTC") if pd.to_datetime(end_date).tzinfo is None else pd.to_datetime(end_date)
+    start = end - timedelta(days=days)
 
     symbol = _alpaca_symbol(ticker)
 
@@ -146,7 +150,7 @@ def fetch_ohlcv(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.Da
         req = CryptoBarsRequest(
             symbol_or_symbols=[symbol],
             timeframe=timeframe,
-            start=start,
+            start=start, end=end,
         )
         bars = _crypto_client.get_crypto_bars(req)
     else:
@@ -154,7 +158,7 @@ def fetch_ohlcv(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.Da
         req = StockBarsRequest(
             symbol_or_symbols=[symbol],
             timeframe=timeframe,
-            start=start,
+            start=start, end=end,
             feed=feed,
         )
         bars = _stock_client.get_stock_bars(req)

@@ -106,9 +106,9 @@ class TradingEngine:
         # Scan manifest — (ticker, strategy, interval)
         # SPY/QQQ run through BOTH mean_rev and pullback strategies.
         self.instruments = [
-            {"ticker": "SPY", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
+            # {"ticker": "SPY", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
             {"ticker": "SPY", "strategy": self.pullback, "interval_seconds": 900, "last_scan": 0},
-            {"ticker": "QQQ", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
+            # {"ticker": "QQQ", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
             {"ticker": "QQQ", "strategy": self.pullback, "interval_seconds": 900, "last_scan": 0},
             # {"ticker": "BTC-USD", "strategy": self.momentum, "interval_seconds": 3600, "last_scan": 0},
             # {"ticker": "GLD", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},

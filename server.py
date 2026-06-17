@@ -284,6 +284,42 @@ def api_chart():
 
 # ── Signal API ─────────────────────────────────────────────────────────────────
 
+
+# ── Alpaca Paper Trading API ──────────────────────────────────────────────────
+#
+# Lazy-initialised singleton so the server starts even if ALPACA_* env vars
+# are absent (the routes return a clear error in that case).
+# ──────────────────────────────────────────────────────────────────────────────
+
+_alpaca_trader = None
+_alpaca_init_error: str = ""
+_alpaca_lock = threading.Lock()
+
+
+def _get_alpaca():
+    """Return the AlpacaTrader singleton, initialising on first call."""
+    global _alpaca_trader, _alpaca_init_error
+    if _alpaca_trader is not None:
+        return _alpaca_trader
+
+    with _alpaca_lock:
+        if _alpaca_trader is not None:
+            return _alpaca_trader
+        try:
+            from src.alpaca_trader import AlpacaTrader
+
+            _alpaca_trader = AlpacaTrader()
+            _alpaca_init_error = ""
+        except Exception as exc:
+            _alpaca_init_error = str(exc)
+            logging.getLogger(__name__).error("AlpacaTrader init failed: %s", exc)
+            _alpaca_trader = None
+    return _alpaca_trader
+
+
+threading.Thread(target=_bg_trade_feedback, daemon=True).start()
+
+
 @app.route("/api/paper/account")
 def api_paper_account():
     """Return Alpaca paper account info + our enforced cash limit."""

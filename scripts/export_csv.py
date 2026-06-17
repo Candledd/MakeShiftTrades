@@ -4,7 +4,7 @@ import pandas as pd
 def export_data():
     mode = input("Which version do you want to export? (ml / risk): ").strip().lower()
     if mode == "ml":
-        study_name = "makeshift_trades_6mo_v5"
+        study_name = "makeshift_trades_6mo_v6"
         csv_filename = "data/optuna_trials_ml.csv"
     else:
         study_name = "makeshift_trades_risk_v1"

@@ -207,9 +207,9 @@ def run_backtest_session(configs_strat, is_oos_mode="IS", account_size=5000.0, r
 
 def objective(trial):
     # --- Risk & Leverage Parameters ---
-    max_position_pct = trial.suggest_float("MAX_POSITION_PCT", 1.0, 10.0, step=0.5)
-    max_risk_pct = trial.suggest_float("MAX_RISK_PCT", 0.01, 0.10, step=0.01)
-    risk_tier_equity = trial.suggest_float("RISK_TIER_EQUITY_PCT", 0.01, 0.10, step=0.01)
+    max_position_pct = trial.suggest_float("MAX_POSITION_PCT", 0.5, 5.0, step=0.5)
+    max_risk_pct = trial.suggest_float("MAX_RISK_PCT", 0.01, 0.06, step=0.01)
+    risk_tier_equity = trial.suggest_float("RISK_TIER_EQUITY_PCT", 0.01, 0.06, step=0.01)
     
     # --- Strategy-specific Risk Limits ---
     tp_stop_mult = trial.suggest_float("TP_STOP_MULT", 1.0, 3.0, step=0.1)
@@ -227,11 +227,12 @@ def objective(trial):
     config.MR_STOP_MULT = mr_stop_mult
     config.MR_MIN_RR = mr_min_rr
     
-    # Loosen portfolio-level constraints so they don't block the optimizer
-    config.MAX_OPEN_PORTFOLIO_RISK_PCT = 0.50
+    # Portfolio-level safety constraints — keep tight to prevent runaway drawdown.
+    # These act as hard guards during backtest, not just score penalties.
+    config.MAX_OPEN_PORTFOLIO_RISK_PCT = 0.10   # Max 6 concurrent trades (heat = risk_pct each)
     config.MAX_CLUSTER_RISK_PCT = 0.50
-    config.MAX_DAILY_LOSS_PCT = -0.10
-    config.MAX_WEEKLY_LOSS_PCT = -0.20
+    config.MAX_DAILY_LOSS_PCT = -0.05           # Halt new entries after -5% daily
+    config.MAX_WEEKLY_LOSS_PCT = -0.12          # Halt new entries after -12% weekly
 
     # Pre-instantiate strategies to save time
     configs_strat = [
@@ -253,7 +254,7 @@ def objective(trial):
     )
     
     # Evaluate robust score
-    if total_signals >= 20 and trades:
+    if total_signals >= 50 and trades:
         trades_df = pd.DataFrame(trades).sort_values('exit_time')
         
         gross_profit = trades_df[trades_df['pnl'] > 0]['pnl'].sum()
@@ -279,16 +280,44 @@ def objective(trial):
         max_trade_concentration = max_trade_pnl / total_pnl if total_pnl > 0 else 1.0
         parameter_instability_penalty = ticker_concentration + max_trade_concentration
         
-        # Classic Quant Institute profile: We EXPECT a 30-40% winrate with massive runners.
-        # Stop penalizing drawdown so aggressively, and heavily reward sheer R-multiple generation.
-        # Add a small bonus for taking more trades (Law of Large Numbers).
+        # ── Consistency & trade quality metrics ─────────────────────────
+        # Equity curve R² (linearity): higher = more consistent returns
+        trade_idx = pd.Series(range(len(trades_df)))
+        equity_r = trade_idx.corr(running_pnl)
+        equity_r_squared = equity_r ** 2 if pd.notna(equity_r) else 0.0
         
+        # Downside deviation (Sortino-style): penalizes frequent small losses
+        r_values = trades_df['pnl'] / RISK_DOLLARS
+        negative_r = r_values[r_values < 0]
+        downside_deviation_R = negative_r.std() if len(negative_r) > 1 else 0.0
+        
+        # Average win / loss ratio (payoff structure)
+        win_trades = trades_df[trades_df['pnl'] > 0]
+        loss_trades = trades_df[trades_df['pnl'] < 0]
+        avg_win = win_trades['pnl'].mean() if len(win_trades) > 0 else 0.0
+        avg_loss = abs(loss_trades['pnl'].mean()) if len(loss_trades) > 0 else 0.0
+        avg_win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 3.0
+        
+        # RISK Optimizer score — optimized for DRAWDOWN CONTROL / RISK EFFICIENCY.
+        # Tunes risk params (position size, stop mult, min RR, equity tiers) that
+        # DIRECTLY control drawdown. Penalties here must be aggressive because this
+        # optimizer's entire purpose is containing drawdown while preserving profit.
+        # A high-profit / high-drawdown param set should score WORSE than
+        # moderate-profit / low-drawdown here.
         score = (
-            (net_R * 1.5)                            # Massively prioritize pure alpha/profit
-            - (0.5 * max_drawdown_R)                 # Accept drawdowns as the cost of doing business
-            + (0.1 * total_signals)                  # Reward the bot for taking more shots (active trading)
-            - 0.5 * abs(strategy_concentration)      # Keep diversification penalty
-            - 0.25 * parameter_instability_penalty   # Keep single-trade concentration penalty
+            # Core risk-adjusted return
+            (net_R * 0.8)                            # Profit discounted — not the main goal
+            - (2.5 * max_drawdown_R)                 # Drawdown penalized 2.5x — this is the job
+            - (4.0 * max(0, max_drawdown_R - 3))     # Tail penalty starts at just 3R ($150 DD)
+            # Consistency
+            + (0.5 * equity_r_squared)               # Equity curve linearity bonus
+            - (0.3 * downside_deviation_R)           # Sortino-style penalty for frequent small losses
+            # Trade quality
+            + (0.02 * (total_signals ** 0.5))        # Trade bonus with diminishing returns
+            + (0.3 * min(avg_win_loss_ratio, 3.0))   # Payoff ratio bonus (capped)
+            # Diversification
+            - 1.0 * abs(strategy_concentration)      # Heavy diversification requirement
+            - 0.5 * parameter_instability_penalty    # Heavy single-trade concentration penalty
         )
 
         # ── Commodity validation: GLD and PDBC ─────────────────────────
@@ -308,7 +337,7 @@ def objective(trial):
         #             return float("-inf")
         # '''
     else:
-        score = -1000.0 - (20 - total_signals) * 10
+        score = -1000.0 - (50 - total_signals) * 10
         
     trial.set_user_attr("SPY_PnL", pnl_by_ticker["SPY"])
     trial.set_user_attr("QQQ_PnL", pnl_by_ticker["QQQ"])
@@ -334,11 +363,11 @@ def evaluate_oos_params(best_params):
     config.MR_STOP_MULT = best_params.get("MR_STOP_MULT", config.MR_STOP_MULT)
     config.MR_MIN_RR = best_params.get("MR_MIN_RR", config.MR_MIN_RR)
     
-    # Loosen portfolio-level constraints for OOS just like in objective
-    config.MAX_OPEN_PORTFOLIO_RISK_PCT = 0.50
+    # Apply same portfolio-level constraints as in objective
+    config.MAX_OPEN_PORTFOLIO_RISK_PCT = 0.06
     config.MAX_CLUSTER_RISK_PCT = 0.50
-    config.MAX_DAILY_LOSS_PCT = -0.10
-    config.MAX_WEEKLY_LOSS_PCT = -0.20
+    config.MAX_DAILY_LOSS_PCT = -0.05
+    config.MAX_WEEKLY_LOSS_PCT = -0.12
 
     # if "TF_EMA_FAST" in best_params:
     #     config.GLD_EMA_FAST = int(best_params["TF_EMA_FAST"])
@@ -387,7 +416,7 @@ if __name__ == "__main__":
     
     study = optuna.create_study(
         study_name="makeshift_trades_risk_v1",
-        storage="sqlite:///optuna_study.db?timeout=60",
+        storage="sqlite:///data/optuna_study.db?timeout=60",
         direction="maximize",
         load_if_exists=True
     )

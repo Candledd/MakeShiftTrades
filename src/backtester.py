@@ -7,8 +7,8 @@ except ImportError:
     from utils import parse_timeframe_to_hours
     from trailing_stops import calculate_trailing_stop
 
-
 import math
+
 
 def simulate_trade(df, entry_idx, signal):
     future_df = df.iloc[entry_idx + 1:]
@@ -59,8 +59,18 @@ def simulate_trade(df, entry_idx, signal):
     # Precompute trailing indicators if needed
     trailing_logic = getattr(signal, 'trailing_stop_logic', 'default')
     
+    # Session gap tracking
+    prev_ts = df.index[entry_idx]
+
+    # expected gap threshold: 2x the bar duration (floor 1 second)
+    expected_gap_seconds = max(parse_timeframe_to_hours(signal.timeframe) * 3600.0, 1.0) * 2.0
+    
     for i, (_, row) in enumerate(future_df.iterrows()):
         curr_idx = entry_idx + 1 + offset + i
+
+        curr_ts = future_df.index[i]
+        is_after_gap = (curr_ts - prev_ts).total_seconds() >= expected_gap_seconds
+
         # Enforce Time Stop
         if i >= max_bars:
             # Exit remaining quantity at current Close
@@ -77,8 +87,18 @@ def simulate_trade(df, entry_idx, signal):
         high = row['High']
         low = row['Low']
         close = row['Close']
+        open_price = row['Open']
         
         if signal.direction == 'BUY':
+            if is_after_gap and open_price <= current_sl:
+                # Gap open already below stop — exit at open (market fill)
+                exit_price = open_price
+                exit_slippage = exit_price * (slippage_pct / 2.0)
+                entry_slippage = signal.entry * (slippage_pct / 2.0)
+                leg_pnl = (exit_price - signal.entry - (entry_slippage + exit_slippage)) * qty_left
+                net_pnl_per_share += leg_pnl
+                return 'SL' if not partial_taken else 'TRAIL_SL', exit_price, offset + i + 1, net_pnl_per_share
+
             if low <= current_sl:
                 # Stop Loss hit
                 exit_price = current_sl
@@ -112,6 +132,15 @@ def simulate_trade(df, entry_idx, signal):
             )
                 
         elif signal.direction == 'SELL':
+            if is_after_gap and open_price >= current_sl:
+                # Gap open already above stop — exit at open (market fill)
+                exit_price = open_price
+                exit_slippage = exit_price * (slippage_pct / 2.0)
+                entry_slippage = signal.entry * (slippage_pct / 2.0)
+                leg_pnl = (signal.entry - exit_price - (entry_slippage + exit_slippage)) * qty_left
+                net_pnl_per_share += leg_pnl
+                return 'SL' if not partial_taken else 'TRAIL_SL', exit_price, offset + i + 1, net_pnl_per_share
+
             if high >= current_sl:
                 # Stop Loss hit
                 exit_price = current_sl
@@ -143,6 +172,9 @@ def simulate_trade(df, entry_idx, signal):
                 entry_price=signal.entry,
                 tp_filled=partial_taken
             )
+
+        # Update gap tracking for next iteration
+        prev_ts = curr_ts
                 
     # EOD or end of data close
     exit_price = future_df["Close"].iloc[-1] if len(future_df) > 0 else signal.entry
@@ -156,7 +188,7 @@ def simulate_trade(df, entry_idx, signal):
     return 'OPEN', exit_price, offset + len(future_df), net_pnl_per_share
 
 
-def run_stateful_backtest(strategies_to_test: list, days_to_test: int, starting_equity: float = 5000.0):
+def run_stateful_backtest(strategies_to_test: list, days_to_test: int, starting_equity: float = 5000.0, end_date: str = None):
     """Run a stateful, event-driven backtest across multiple strategies/tickers.
 
     Parameters
@@ -196,7 +228,7 @@ def run_stateful_backtest(strategies_to_test: list, days_to_test: int, starting_
 
     print("RegimeClassifier: fitting on SPY (2y/1d)...", end=" ")
     regime_classifier = RegimeClassifier(n_states=3)
-    spy_df = fetch_ohlcv("SPY", period="2y", interval="1d")
+    spy_df = fetch_ohlcv("SPY", period="2y", interval="1d", end_date=end_date)
     if spy_df is not None and not spy_df.empty:
         last_spy_ts = spy_df.index[-1]
         start_timestamp = last_spy_ts - timedelta(days=days_to_test)
@@ -221,7 +253,7 @@ def run_stateful_backtest(strategies_to_test: list, days_to_test: int, starting_
             continue
 
         print(f"  Fetching {ticker} ({tf}, period=1y)...", end=" ")
-        df = fetch_ohlcv(ticker, period="1y", interval=tf)
+        df = fetch_ohlcv(ticker, period="1y", interval=tf, end_date=end_date)
         if df is None or len(df) < 50:
             print("SKIPPED (insufficient data)")
             continue

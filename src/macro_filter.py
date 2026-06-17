@@ -28,7 +28,7 @@ class MacroFilter:
     _last_check_time: float = 0.0
     _CHECK_INTERVAL: float = 5.0
     _lock = threading.Lock()
-    _calendar_path: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "macro_calendar.json")
+    _calendar_path: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/macro_calendar.json")
 
     @classmethod
     def load_events(cls) -> List[Dict[str, Any]]:

@@ -889,6 +889,678 @@ async function loadSignal() {
 
 /* ── Startup ────────────────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {
+  initChart();
+  applyPersistedUIState();
+  ['ar-btn','hdr-ar'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', arEnabled);
+  });
+  updateARLabel();
+  if (activeTicker) {
+    loadChart(false);
+    startAR();
+  }
+  // Init paper trading panel
+  refreshPaperStatus();
+
+  // Init autonomous bot status polling (bot tab is the default view)
   refreshBotStatus();
-  if (!botStatusTimer) botStatusTimer = setInterval(refreshBotStatus, 2000);
+  if (!botStatusTimer) {
+    botStatusTimer = setInterval(refreshBotStatus, 2000);
+  }
 });
+
+window.addEventListener('beforeunload', () => {
+  persistViewState();
+  persistUIState();
+});
+
+/* ── Paper Trading ──────────────────────────────────────────────────────── */
+
+// Latest signal cache — populated by loadSignal(), consumed by executePaperTrade()
+let _lastSignal = null;
+// Dedup key: prevents re-executing the same signal on every auto-refresh cycle
+let _lastAutoTradeKey = null;
+// Set to true while any open orders exist; blocks auto-trade until they clear
+let _hasOpenOrders = false;
+
+// Track the paper-status polling timer
+let _ptStatusTimer = null;
+
+function setPtMsg(text, type = '') {
+  const el = document.getElementById('pt-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.className   = 'pt-msg' + (type ? ' ' + type : '');
+}
+
+function setConnDot(state) {
+  // state: 'ok' | 'err' | 'wait'
+  const dot = document.getElementById('pt-conn-dot');
+  if (!dot) return;
+  dot.className = 'pt-conn-dot pt-conn-' + state;
+  dot.title = state === 'ok'   ? 'API connected'
+            : state === 'err'  ? 'API error / disconnected'
+            : 'Checking…';
+}
+
+async function refreshPaperStatus() {
+  try {
+    const ticker = activeTicker || '';
+    const r      = await fetch(`/api/paper/status${ticker ? '?ticker=' + encodeURIComponent(ticker) : ''}`);
+    const d      = await r.json();
+
+    setConnDot(d.connected ? 'ok' : 'err');
+
+    // Sync toggle for the current ticker
+    const toggle = document.getElementById('pt-toggle');
+    if (toggle && ticker) {
+      const isOn = !!(d.enabled || {})[ticker];
+      toggle.checked = isOn;
+      syncToggleUI(isOn);
+    }
+
+    // Update account info
+    if (d.connected) {
+      const ar = await fetch('/api/paper/account');
+      const ad = await ar.json();
+      if (ad.ok) {
+        document.getElementById('pt-cash-limit').textContent    =
+          '$' + (ad.cash_limit || 0).toLocaleString('en-US', {maximumFractionDigits: 2});
+        document.getElementById('pt-buying-power').textContent  =
+          '$' + (ad.buying_power || 0).toLocaleString('en-US', {maximumFractionDigits: 2});
+        const pnl = ad.total_pnl || 0;
+        const pnlEl = document.getElementById('pt-pnl');
+        pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+        pnlEl.style.color = pnl >= 0 ? 'var(--bull)' : 'var(--bear)';
+        document.getElementById('pt-acct-info').style.display = 'block';
+      }
+      // Refresh orders list
+      refreshOrdersList();
+    }
+  } catch (err) {
+    setConnDot('err');
+    console.warn('refreshPaperStatus error:', err);
+  }
+}
+
+async function refreshOrdersList() {
+  try {
+    const r = await fetch('/api/paper/orders');
+    const d = await r.json();
+    if (!d.ok) return;
+    const list = document.getElementById('pt-orders-list');
+    const wrap = document.getElementById('pt-orders-wrap');
+    if (!list || !wrap) return;
+
+    list.innerHTML = '';
+    if (!d.orders || d.orders.length === 0) {
+      _hasOpenOrders = false;
+      _lastAutoTradeKey = null; // allow fresh auto-trade once orders clear
+      wrap.style.display = 'none';
+      return;
+    }
+    _hasOpenOrders = true;
+    wrap.style.display = 'block';
+    for (const o of d.orders) {
+      const sideClass = o.side && o.side.toLowerCase().includes('buy')
+                        ? 'pt-order-side-buy' : 'pt-order-side-sell';
+      const row = document.createElement('div');
+      row.className = 'pt-order-row';
+
+      // Build DOM nodes (no innerHTML) to avoid XSS from API response data
+      const sideSpan   = document.createElement('span');
+      sideSpan.className = sideClass;
+      sideSpan.textContent = (o.side || '').toUpperCase();
+
+      const symSpan    = document.createElement('span');
+      symSpan.textContent = o.symbol || '';
+
+      const qtySpan    = document.createElement('span');
+      qtySpan.style.color = 'var(--muted)';
+      // Show dollar notional when available, fall back to qty for older orders
+      qtySpan.textContent = o.notional != null
+        ? '$' + Number(o.notional).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+        : '×' + (o.qty || '');
+
+      const stSpan     = document.createElement('span');
+      stSpan.style.cssText = 'font-size:10px;color:var(--muted)';
+      stSpan.textContent   = o.status || '';
+
+      const cancelBtn  = document.createElement('button');
+      cancelBtn.className   = 'pt-cancel-btn';
+      cancelBtn.title       = 'Cancel order';
+      cancelBtn.textContent = '✕';
+      cancelBtn.addEventListener('click', () => cancelPaperOrder(o.id));
+
+      row.appendChild(sideSpan);
+      row.appendChild(symSpan);
+      row.appendChild(qtySpan);
+      row.appendChild(stSpan);
+      row.appendChild(cancelBtn);
+      list.appendChild(row);
+    }
+  } catch (err) {
+    console.warn('refreshOrdersList error:', err);
+  }
+}
+
+async function cancelPaperOrder(orderId) {
+  setPtMsg('Cancelling…');
+  try {
+    const r = await fetch(`/api/paper/cancel/${encodeURIComponent(orderId)}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.ok) {
+      setPtMsg('Order cancelled.', 'ok');
+      refreshOrdersList();
+    } else {
+      setPtMsg('Cancel failed: ' + (d.error || 'unknown'), 'err');
+    }
+  } catch (err) {
+    setPtMsg('Network error during cancel.', 'err');
+    console.error('cancelPaperOrder error:', err);
+  }
+}
+
+function syncToggleUI(isOn) {
+  const lbl = document.getElementById('pt-status-lbl');
+  if (lbl) {
+    lbl.textContent = isOn ? 'ON — Auto Trading' : 'OFF';
+    lbl.className   = 'pt-status-lbl ' + (isOn ? 'pt-status-on' : 'pt-status-off');
+  }
+  // Switching OFF clears the dedup key so re-enabling fires on the current signal
+  if (!isOn) _lastAutoTradeKey = null;
+  refreshExecuteButton();
+}
+
+async function onPaperToggle(enabled) {
+  syncToggleUI(enabled);
+  if (!activeTicker) return;
+  setPtMsg(enabled ? 'Enabling paper trading…' : 'Disabling paper trading…');
+  try {
+    const r = await fetch('/api/paper/toggle', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ ticker: activeTicker, enabled }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      setPtMsg(enabled
+        ? `Paper trading ENABLED for ${activeTicker}.`
+        : `Paper trading DISABLED for ${activeTicker}.`,
+        enabled ? 'ok' : '');
+      refreshPaperStatus();
+    } else {
+      setPtMsg('Toggle failed: ' + (d.error || 'unknown'), 'err');
+      // Revert checkbox
+      const toggle = document.getElementById('pt-toggle');
+      if (toggle) toggle.checked = !enabled;
+      syncToggleUI(!enabled);
+    }
+  } catch (err) {
+    setPtMsg('Network error.', 'err');
+    const toggle = document.getElementById('pt-toggle');
+    if (toggle) toggle.checked = !enabled;
+    syncToggleUI(!enabled);
+    console.error('onPaperToggle error:', err);
+  }
+}
+
+function refreshExecuteButton() {
+  const btn      = document.getElementById('pt-execute-btn');
+  const toggle   = document.getElementById('pt-toggle');
+  if (!btn) return;
+
+  const isOn = toggle && toggle.checked;
+  const sig  = _lastSignal;
+  const hasActionable = sig && sig.smc && sig.smc.entry != null
+                        && (sig.signal === 'BUY' || sig.signal === 'SELL');
+
+  if (!isOn) {
+    btn.disabled     = true;
+    btn.textContent  = 'Toggle ON to auto-trade';
+    btn.className    = 'pt-execute-btn';
+    return;
+  }
+
+  if (!hasActionable) {
+    btn.disabled    = true;
+    btn.textContent = '⚡ Auto: Watching for signal…';
+    btn.className   = 'pt-execute-btn';
+    return;
+  }
+
+  // Actionable — button still works as a manual override
+  btn.disabled    = false;
+  btn.textContent = `⚡ Auto ▶ ${sig.signal}  ${activeTicker}`;
+  btn.className   = 'pt-execute-btn ' + (sig.signal === 'BUY' ? 'buy' : 'sell');
+}
+
+async function executePaperTrade() {
+  const sig = _lastSignal;
+  if (!sig || !sig.smc || sig.smc.entry == null) {
+    setPtMsg('No valid signal to execute.', 'err');
+    return;
+  }
+
+  const payload = {
+    ticker:         activeTicker,
+    side:           sig.signal,           // "BUY" or "SELL"
+    entry:          sig.smc.entry,
+    stop_loss:      sig.smc.stop_loss,
+    take_profit:    sig.smc.take_profit,
+    confidence:     sig.confidence,
+    min_confidence: _getMinConf(),
+  };
+
+  setPtMsg('Submitting bracket order…');
+  document.getElementById('pt-execute-btn').disabled = true;
+
+  try {
+    const r = await fetch('/api/paper/execute', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload),
+    });
+    const d = await r.json();
+
+    if (d.ok) {
+      const notional = d.notional != null
+        ? '$' + Number(d.notional).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+        : (d.qty ? d.qty + '×' : '');
+      setPtMsg(
+        `✓ Order placed! ${d.side} ${notional} ${d.symbol} | ID: ${d.order_id.slice(0, 8)}…`,
+        'ok'
+      );
+      refreshOrdersList();
+      refreshPaperStatus();
+    } else {
+      setPtMsg('✗ ' + (d.error || 'Order failed'), 'err');
+      console.error('executePaperTrade error:', d.error);
+    }
+  } catch (err) {
+    setPtMsg('Network error — order not sent.', 'err');
+    console.error('executePaperTrade network error:', err);
+  } finally {
+    refreshExecuteButton();
+  }
+}
+
+// Hook into loadSignal so the execute button always reflects the latest signal
+const _origLoadSignal = loadSignal;
+loadSignal = async function() {
+  await _origLoadSignal.apply(this, arguments);
+};
+
+// Patch the existing loadSignal to cache the result (we wrap the fetch section)
+// The cache is set via a small helper called from inside loadSignal.
+function _cacheSignal(data) {
+  _lastSignal = data;
+  refreshExecuteButton();
+  _maybeAutoTrade();
+}
+
+function _getMinConf() {
+  const el = document.getElementById('pt-conf-slider');
+  return el ? parseInt(el.value, 10) : 60;
+}
+
+function updateConfSlider(val) {
+  const v = document.getElementById('pt-conf-val');
+  if (v) v.textContent = val + '%';
+}
+
+// Auto-execute a trade when the toggle is ON and a new actionable signal arrives.
+// Deduplication is done via a key of ticker|side|entry|interval so the same
+// setup is never submitted twice across consecutive auto-refresh cycles.
+function _maybeAutoTrade() {
+  const toggle = document.getElementById('pt-toggle');
+  if (!toggle || !toggle.checked) return;
+
+  const sig = _lastSignal;
+  if (!sig || !sig.smc || sig.smc.entry == null) return;
+  if (sig.signal !== 'BUY' && sig.signal !== 'SELL') return;
+
+  // Don't attempt a new entry while any orders are still open
+  if (_hasOpenOrders) return;
+
+  // Enforce the min-confidence threshold before auto-executing
+  if ((sig.confidence || 0) < _getMinConf()) return;
+
+  // Key on direction only (not entry price) — entry fluctuates every candle on
+  // 1m bars and would otherwise re-fire on every auto-refresh cycle.
+  const key = `${activeTicker}|${sig.signal}|${activeItvl}`;
+  if (key === _lastAutoTradeKey) return; // already executed this setup
+
+  _lastAutoTradeKey = key;
+  setPtMsg(`⚡ Auto-executing ${sig.signal} signal…`);
+  executePaperTrade();
+}
+
+// Poll paper status every 15 s while the page is open
+setInterval(refreshPaperStatus, 15_000);
+
+/* ── Autonomous Bot Dashboard Tab Controls & Logic ──────────────────────── */
+let activeTab = 'bot';
+let botStatusTimer = null;
+let lastLogTimestamp = 0;
+let knownLogs = new Set();
+
+function switchTab(tabName) {
+  activeTab = tabName;
+  
+  // Toggle tab buttons
+  document.getElementById('tab-btn-chart').classList.toggle('active', tabName === 'chart');
+  document.getElementById('tab-btn-bot').classList.toggle('active', tabName === 'bot');
+  
+  // Toggle layouts
+  document.getElementById('view-chart').style.display = tabName === 'chart' ? 'grid' : 'none';
+  document.getElementById('view-bot').style.display = tabName === 'bot' ? 'grid' : 'none';
+  
+  if (tabName === 'bot') {
+    // Start polling bot status when dashboard is active
+    refreshBotStatus();
+    if (!botStatusTimer) {
+      botStatusTimer = setInterval(refreshBotStatus, 2000);
+    }
+  } else {
+    // Stop polling when not in use
+    if (botStatusTimer) {
+      clearInterval(botStatusTimer);
+      botStatusTimer = null;
+    }
+  }
+}
+
+async function refreshBotStatus() {
+  try {
+    const res = await fetch('/api/bot/status');
+    const data = await res.json();
+    if (!data.ok) return;
+    
+    // Update Running State
+    const statusVal = document.getElementById('bot-status-val');
+    const toggleBtn = document.getElementById('bot-toggle-btn');
+    
+    const pulseDot = document.getElementById('bot-pulse');
+
+    if (data.running) {
+      statusVal.textContent = 'RUNNING';
+      statusVal.style.color = 'var(--bull)';
+      toggleBtn.textContent = 'Stop Bot';
+      toggleBtn.style.backgroundColor = 'var(--bear)';
+      if (pulseDot) pulseDot.style.display = 'inline-block';
+    } else {
+      statusVal.textContent = 'STOPPED';
+      statusVal.style.color = 'var(--bear)';
+      toggleBtn.textContent = 'Start Bot';
+      toggleBtn.style.backgroundColor = 'var(--bull)';
+      if (pulseDot) pulseDot.style.display = 'none';
+    }
+    
+    // Update Stats
+    if (document.getElementById('bot-regime-val')) {
+      let rText = 'Unknown';
+      if (typeof data.ai_regime === 'object') {
+        const eq = data.ai_regime.Equity ? data.ai_regime.Equity.split(' ')[0] : '?';
+        const cr = data.ai_regime.Crypto ? data.ai_regime.Crypto.split(' ')[0] : '?';
+        const co = data.ai_regime.Commodity ? data.ai_regime.Commodity.split(' ')[0] : '?';
+        rText = `EQ: ${eq} | BTC: ${cr} | GLD: ${co}`;
+      } else {
+        rText = data.ai_regime || 'Unknown';
+      }
+      document.getElementById('bot-regime-val').textContent = rText;
+    }
+    document.getElementById('bot-uptime-val').textContent = formatUptime(data.uptime);
+    document.getElementById('bot-cycles-val').textContent = data.cycle_count || 0;
+    document.getElementById('bot-signals-val').textContent = data.signals_today || 0;
+    document.getElementById('bot-orders-val').textContent = data.orders_today || 0;
+    
+    // Update Config Input controls (only if they aren't currently being modified by the user)
+    if (document.activeElement !== document.getElementById('bot-risk-slider')) {
+      document.getElementById('bot-risk-slider').value = data.config.max_risk_pct * 100;
+      document.getElementById('bot-risk-label').textContent = (data.config.max_risk_pct * 100).toFixed(1) + '%';
+    }
+    if (document.activeElement !== document.getElementById('bot-max-positions-slider')) {
+      document.getElementById('bot-max-positions-slider').value = data.config.max_positions;
+      document.getElementById('bot-max-positions-label').textContent = data.config.max_positions;
+    }
+    if (document.activeElement !== document.getElementById('bot-scan-interval-slider')) {
+      document.getElementById('bot-scan-interval-slider').value = data.config.scan_interval;
+      document.getElementById('bot-scan-interval-label').textContent = data.config.scan_interval + 's';
+    }
+    document.getElementById('bot-dry-run-toggle').checked = data.config.dry_run;
+    
+    // Render Instruments Table
+    const tableBody = document.getElementById('bot-instruments-table');
+    if (data.instruments && data.instruments.length > 0) {
+      tableBody.innerHTML = data.instruments.map(inst => {
+        const lastScanText = inst.last_scan > 0 
+          ? new Date(inst.last_scan * 1000).toLocaleTimeString() 
+          : 'Never';
+        return `
+          <tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: 8px 0; font-weight: 600;">${inst.ticker}</td>
+            <td style="padding: 8px 0; color: var(--muted);">${inst.strategy}</td>
+            <td style="padding: 8px 0;"><span class="itvl-btn active" style="padding: 2px 6px; font-size: 10px;">${inst.timeframe}</span></td>
+            <td style="padding: 8px 0; text-align: right; color: var(--muted);">${lastScanText}</td>
+          </tr>
+        `;
+      }).join('');
+    } else {
+      tableBody.innerHTML = `
+        <tr>
+          <td colspan="4" style="text-align: center; color: var(--muted); padding: 20px 0;">No instruments loaded</td>
+        </tr>
+      `;
+    }
+    
+    // Fetch logs
+    await refreshBotLogs();
+    
+    // Fetch live broker state (Positions & Orders)
+    await refreshBotBrokerState();
+
+  } catch (err) {
+    console.error('Error refreshing bot status:', err);
+  }
+}
+
+async function refreshBotLogs() {
+  try {
+    const res = await fetch('/api/bot/logs');
+    const data = await res.json();
+    if (!data.ok) return;
+    
+    const consoleEl = document.getElementById('bot-log-console');
+    let shouldScroll = consoleEl.scrollHeight - consoleEl.clientHeight <= consoleEl.scrollTop + 50;
+    
+    let added = false;
+    data.logs.forEach(line => {
+      if (!knownLogs.has(line)) {
+        knownLogs.add(line);
+        const lineEl = document.createElement('div');
+        lineEl.style.marginBottom = '4px';
+        lineEl.style.display = 'flex';
+        lineEl.style.alignItems = 'flex-start';
+        
+        // Parse the log line: "2026-06-10 12:00:00 [INFO] src.engine — Message"
+        // Regex to separate timestamp, level, and message
+        const match = line.match(/^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})\s\[(.*?)\]\s.*?—\s(.*)$/);
+        
+        if (match) {
+          const [, timestamp, level, msg] = match;
+          
+          let lvlClass = 'info';
+          if (level === 'ERROR') lvlClass = 'error';
+          if (level === 'WARNING') lvlClass = 'warn';
+          
+          let msgClass = '';
+          if (msg.includes('[SIGNAL]')) msgClass = 'highlight-signal';
+          if (msg.includes('[ORDER PLACED]')) msgClass = 'highlight-order';
+          if (msg.includes('[REJECTED]')) msgClass = 'highlight-reject';
+
+          lineEl.innerHTML = `
+            <span class="log-time" style="flex-shrink:0;">${timestamp.split(' ')[1]}</span>
+            <span class="log-level ${lvlClass}" style="flex-shrink:0;">${level}</span>
+            <span class="log-msg ${msgClass}">${msg}</span>
+          `;
+        } else {
+          // Fallback if regex fails to match structure
+          lineEl.textContent = line;
+          if (line.includes('[ERROR]')) lineEl.style.color = '#ef4444';
+        }
+        
+        consoleEl.appendChild(lineEl);
+        added = true;
+      }
+    });
+    
+    if (added && shouldScroll) {
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+  } catch (err) {
+    console.error('Error fetching bot logs:', err);
+  }
+}
+
+async function toggleBotEngine() {
+  const statusVal = document.getElementById('bot-status-val');
+  const currentlyRunning = statusVal.textContent === 'RUNNING';
+  
+  try {
+    const res = await fetch('/api/bot/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !currentlyRunning })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      refreshBotStatus();
+    } else {
+      alert('Error toggling bot: ' + data.error);
+    }
+  } catch (err) {
+    console.error('Error toggling bot:', err);
+  }
+}
+
+function updateBotConfigLabels() {
+  const riskVal = parseFloat(document.getElementById('bot-risk-slider').value);
+  document.getElementById('bot-risk-label').textContent = riskVal.toFixed(2) + '%';
+  
+  const positionsVal = parseInt(document.getElementById('bot-max-positions-slider').value, 10);
+  document.getElementById('bot-max-positions-label').textContent = positionsVal;
+  
+  const intervalVal = parseInt(document.getElementById('bot-scan-interval-slider').value, 10);
+  document.getElementById('bot-scan-interval-label').textContent = intervalVal + 's';
+}
+
+async function updateBotConfig() {
+  const dryRun = document.getElementById('bot-dry-run-toggle').checked;
+  const riskPct = parseFloat(document.getElementById('bot-risk-slider').value) / 100.0;
+  const maxPositions = parseInt(document.getElementById('bot-max-positions-slider').value, 10);
+  const scanInterval = parseFloat(document.getElementById('bot-scan-interval-slider').value);
+  
+  try {
+    const res = await fetch('/api/bot/configure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dry_run: dryRun,
+        max_risk_pct: riskPct,
+        max_positions: maxPositions,
+        scan_interval: scanInterval
+      })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      console.error('Failed to update bot config:', data.error);
+    }
+  } catch (err) {
+    console.error('Error updating bot config:', err);
+  }
+}
+
+function clearConsoleLog() {
+  const consoleEl = document.getElementById('bot-log-console');
+  consoleEl.innerHTML = '';
+  knownLogs.clear();
+}
+
+async function refreshBotBrokerState() {
+  try {
+    const res = await fetch('/api/bot/broker');
+    const data = await res.json();
+    if (!data.ok) return;
+
+    // Render Positions
+    const posTable = document.getElementById('bot-positions-table');
+      if (data.positions && data.positions.length > 0) {
+        posTable.innerHTML = data.positions.map(pos => {
+          const sideColor = pos.side.toLowerCase() === 'long' || pos.side.toLowerCase() === 'buy' ? 'var(--bull)' : 'var(--bear)';
+          const pnlColor = pos.unrealized_pl >= 0 ? 'var(--bull)' : 'var(--bear)';
+          const pnlSign = pos.unrealized_pl >= 0 ? '+' : '';
+          
+          const slStr = pos.stop_loss ? `$${pos.stop_loss.toFixed(2)}` : '—';
+          const tpStr = pos.take_profit ? `$${pos.take_profit.toFixed(2)}` : '—';
+          
+          return `
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
+              <td style="padding: 8px 4px; font-weight: 600;">${pos.symbol}</td>
+              <td style="padding: 8px 4px; color: ${sideColor}; font-weight: bold; text-transform: uppercase;">${pos.side}</td>
+              <td style="padding: 8px 4px; text-align: right;">${pos.qty}</td>
+              <td style="padding: 8px 4px; text-align: right;">$${pos.avg_entry_price.toFixed(2)}</td>
+              <td style="padding: 8px 4px; text-align: right;">${slStr}</td>
+              <td style="padding: 8px 4px; text-align: right;">${tpStr}</td>
+              <td style="padding: 8px 4px; text-align: right; color: ${pnlColor}; font-weight: bold;">${pnlSign}$${pos.unrealized_pl.toFixed(2)}</td>
+            </tr>
+          `;
+        }).join('');
+      } else {
+        posTable.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--muted); padding: 20px 0;">No active positions</td></tr>`;
+      }
+
+    // Render Orders
+    const ordTable = document.getElementById('bot-orders-table');
+    if (data.orders && data.orders.length > 0) {
+      ordTable.innerHTML = data.orders.map(ord => {
+        const sideColor = ord.side.toLowerCase() === 'buy' ? 'var(--bull)' : 'var(--bear)';
+        
+        let priceStr = 'MKT';
+        if (ord.limit_price) {
+          priceStr = `$${ord.limit_price.toFixed(2)}`;
+        } else if (ord.stop_price) {
+          priceStr = `STP $${ord.stop_price.toFixed(2)}`;
+        }
+        
+        return `
+          <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
+            <td style="padding: 8px 4px; font-weight: 600;">${ord.symbol}</td>
+            <td style="padding: 8px 4px; color: ${sideColor}; font-weight: bold; text-transform: uppercase;">${ord.side}</td>
+            <td style="padding: 8px 4px; color: var(--muted); text-transform: capitalize;">${ord.type}</td>
+            <td style="padding: 8px 4px; text-align: right; font-family: monospace;">${priceStr}</td>
+          </tr>
+        `;
+      }).join('');
+    } else {
+      ordTable.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--muted); padding: 20px 0;">No pending orders</td></tr>`;
+    }
+
+  } catch (err) {
+    console.error('Error refreshing broker state:', err);
+  }
+}
+
+function formatUptime(secs) {
+  if (!secs) return '0s';
+  const hrs = Math.floor(secs / 3600);
+  const mins = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  
+  let res = '';
+  if (hrs > 0) res += `${hrs}h `;
+  if (mins > 0 || hrs > 0) res += `${mins}m `;
+  res += `${s}s`;
+  return res;
+}

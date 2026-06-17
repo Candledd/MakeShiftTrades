@@ -18,8 +18,8 @@ src.regime_classifier.HMM_AVAILABLE = False
 
 from src.backtester import run_stateful_backtest as _run_stateful_backtest
 
-def run_stateful_backtest(strategies_to_test, days):
-    return _run_stateful_backtest(strategies_to_test, days_to_test=days)
+def run_stateful_backtest(strategies_to_test, days, end_date=None):
+    return _run_stateful_backtest(strategies_to_test, days_to_test=days, end_date=end_date)
 
 # Suppress debug logging during backtest to keep console clean
 logging.basicConfig(level=logging.CRITICAL, format='%(message)s')
@@ -27,7 +27,7 @@ logging.getLogger("src.strategies").setLevel(logging.CRITICAL)
 logging.getLogger("charts.data").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 
-def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=12):
+def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
     if os.path.exists("data/best_ml_params.json") or os.path.exists("data/best_risk_params.json"):
         print("-> Loading optimized parameters from ML/Risk configs automatically via config.py...")
         # Since config.py loads them directly, we don't need to manually re-apply them here.
@@ -48,7 +48,7 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=12):
     ]
     
     days = 30 * months
-    run_stateful_backtest(strategies_to_test, days=days)
+    run_stateful_backtest(strategies_to_test, days=days, end_date="2023-01-01")
     
 if __name__ == "__main__":
     run_pnl_backtest()

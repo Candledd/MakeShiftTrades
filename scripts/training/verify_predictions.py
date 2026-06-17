@@ -12,16 +12,7 @@ import config
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum_breakout import MomentumBreakoutStrategy
 from src.strategies.trend_pullback import TrendPullbackStrategy
-from charts.data import fetch_ohlcv
-
 logging.basicConfig(level=logging.CRITICAL, format='%(message)s')
-
-DATA_CACHE = {}
-def load_data(months=3):
-    for ticker, tf in [("SPY", "15m"), ("QQQ", "15m"), ("BTC-USD", "1h")]:
-        df = fetch_ohlcv(ticker, period=f"{months+1}mo", interval=tf)
-        if df is not None and len(df) >= 200:
-            DATA_CACHE[(ticker, tf)] = df
 
 def simulate_trade(df, entry_idx, signal):
     future_df = df.iloc[entry_idx + 1:]
@@ -98,6 +89,7 @@ if __name__ == "__main__":
         sets = json.load(f)
         
     print("Loading data for cache... (this takes a few seconds)")
+    ml_optimizer.load_data(months=3)
     
     if os.path.exists(best_params_file):
         with open(best_params_file, "r") as f:

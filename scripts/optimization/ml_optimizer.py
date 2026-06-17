@@ -217,7 +217,7 @@ def objective(trial):
     mr_bb_period = trial.suggest_int("MR_BB_PERIOD", 10, 40)
     mr_rsi_period = trial.suggest_int("MR_RSI_PERIOD", 5, 20)
     tp_bb_period = trial.suggest_int("TP_BB_PERIOD", 10, 40)
-    mb_compression_threshold = trial.suggest_int("MB_COMPRESSION_THRESHOLD", 50, 65, step=5)
+    mb_compression_threshold = trial.suggest_int("MB_COMPRESSION_THRESHOLD", 50, 65, step=1)
     
     # mr_tp_target_mult = trial.suggest_float("MR_TP_TARGET_MULT", 0.5, 2.5, step=0.1)
 
@@ -314,16 +314,20 @@ def objective(trial):
         max_trade_concentration = max_trade_pnl / total_pnl if total_pnl > 0 else 1.0
         parameter_instability_penalty = ticker_concentration + max_trade_concentration
         
-        # Classic Quant Institute profile: We EXPECT a 30-40% winrate with massive runners.
-        # Stop penalizing drawdown so aggressively, and heavily reward sheer R-multiple generation.
-        # Add a small bonus for taking more trades (Law of Large Numbers).
-        
+        # ML Optimizer score — optimized for SIGNAL QUALITY / STRATEGY EDGE.
+        # Tunes strategy params (BB period, RSI period, Donchian, etc.)
+        # that determine which signals fire and how often.
+        # Profit factor + trade count rewarded because more + better signals
+        # = more data for the ML model. Drawdown penalty exists but is secondary
+        # since strategy params don't directly control sizing.
         score = (
-            (net_R * 1.5)                            # Massively prioritize pure alpha/profit
-            - (0.5 * max_drawdown_R)                 # Accept drawdowns as the cost of doing business
-            + (0.1 * total_signals)                  # Reward the bot for taking more shots (active trading)
-            - 0.5 * abs(strategy_concentration)      # Keep diversification penalty
-            - 0.25 * parameter_instability_penalty   # Keep single-trade concentration penalty
+            (net_R * 1.0)                            # Pure profit
+            + (profit_factor_bonus * 0.5)            # Signal quality bonus
+            + (0.08 * total_signals)                 # More trades = better signal diversity
+            - (1.0 * max_drawdown_R)                 # Drawdown matters, secondary concern
+            - 0.5 * abs(strategy_concentration)      # Want all strategies contributing
+            - 0.25 * parameter_instability_penalty   # Single-trade concentration penalty
+            - (2.0 * max(0, max_drawdown_R - 8))     # Tail penalty above 8R ($400 DD)
         )
 
         # ── Commodity validation: GLD and PDBC ─────────────────────────
@@ -421,7 +425,7 @@ if __name__ == "__main__":
     
     study = optuna.create_study(
         study_name="makeshift_trades_6mo_v6",
-        storage="sqlite:///optuna_study.db?timeout=60",
+        storage="sqlite:///data/optuna_study.db?timeout=60",
         direction="maximize",
         load_if_exists=True
     )
