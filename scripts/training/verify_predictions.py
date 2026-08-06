@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.CRITICAL, format='%(message)s')
 
 def simulate_trade(df, entry_idx, signal):
     future_df = df.iloc[entry_idx + 1:]
-    max_bars = 10 if signal.ticker in ["BTC-USD", "ETH-USD"] else 16
+    max_bars = 16
     for i, (_, row) in enumerate(future_df.iterrows()):
         if i >= max_bars:
             return 'TIME_STOP', row['Close']
@@ -61,8 +61,7 @@ def test_params(params):
         ("SPY", "15m", MeanReversionStrategy()),
         ("QQQ", "15m", MeanReversionStrategy()),
         ("SPY", "15m", TrendPullbackStrategy()),
-        ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy())
+        ("QQQ", "15m", TrendPullbackStrategy())
     ]
     
     total_pnl, total_signals, pnl_by_ticker, pnl_by_strategy, trades = run_backtest_session(

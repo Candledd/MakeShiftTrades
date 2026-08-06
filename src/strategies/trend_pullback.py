@@ -143,9 +143,10 @@ class TrendPullbackStrategy(BaseStrategy):
         near_poc = poc_distance <= _VP_POC_DIST_PCT
 
         # -- Simple pullback entry ---------------------------------------
-        # BUY if price pulls back below SMA20 (price mean-reverting within
-        # a bullish trend) and RSI is weak (< 50).
-        if not (current_close < current_sma20 and current_rsi < 50):
+        # BUY if price dipped below SMA20 but is now showing a bullish candle
+        # (current_close > current_open) to indicate reversal.
+        current_open = float(df["Open"].iloc[-1])
+        if not (low_last < current_sma20 and current_rsi < 50 and current_close > current_open):
             return None
 
         direction: str = "BUY"
@@ -155,9 +156,11 @@ class TrendPullbackStrategy(BaseStrategy):
         order_type = "MARKET"
         stop_loss = self.compute_stop_loss(entry, direction, atr=atr_val)
 
-        # Take-profit: the higher of VWAP, SMA20, Value Area High, and 2.0× ATR extension
-        # The ATR-based target ensures winners have room to run past the initial resistance.
-        take_profit = max(current_vwap, current_sma20, va_high, entry + 2.0 * atr_val)
+        # Take-profit: Realistic target based on ATR or SMA
+        # Limit VWAP/VA impact so we don't get unrealistic R/R ratios that never hit
+        tp_price_based = max(current_sma20, entry + 2.5 * atr_val) if current_sma20 > entry else entry + 2.5 * atr_val
+        take_profit = min(tp_price_based, entry + 4.0 * atr_val)
+
         
         if take_profit <= entry:
             logger.debug("%s %s: inverted TP/Entry (TP=%.2f <= Entry=%.2f)", self.name, ticker, take_profit, entry)

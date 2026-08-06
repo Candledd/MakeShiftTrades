@@ -150,16 +150,23 @@ def calculate_trailing_stop(
         if not tp_filled:
             # Do not trail until partial TP is taken (let the mean reversion play out)
             return current_sl
-        vwap_val = _compute_vwap(df)
-        if vwap_val is not None:
+        
+        # After partial TP, move stop to breakeven so we don't turn a winner into a loser
+        if entry_price is not None:
             if is_long:
-                return max(current_sl, vwap_val)
+                return max(current_sl, entry_price)
             else:
-                return min(current_sl, vwap_val)
+                return min(current_sl, entry_price)
         return current_sl
 
     # ── sma20_or_ema (trend pullback) ─────────────────────────────────────
     elif logic_type == "sma20_or_ema":
+        if not tp_filled:
+            # Do not trail until partial TP is taken — the entry condition is
+            # close < SMA20, so trailing to SMA20 immediately would jump the
+            # stop above entry, guaranteeing tiny wins and inflating winrate.
+            return current_sl
+
         if df is not None and len(df) >= 20:
             close = df["Close"]
             sma20_series = close.rolling(20).mean()

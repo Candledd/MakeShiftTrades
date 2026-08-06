@@ -56,9 +56,6 @@ class RiskManager:
         # ── Spread / liquidity cap ────────────────────────────────────
         self._spread_atr_cap_pct = getattr(_cfg, 'SPREAD_ATR_CAP_PCT', 0.05)
 
-        # ── Gap / slippage buffer ─────────────────────────────────────
-        self._gap_buffer_pct = getattr(_cfg, 'GAP_SLIPPAGE_BUFFER_PCT', 0.001)
-
         # ── Volatility shock ──────────────────────────────────────────
         self._shock_atr_pct = getattr(_cfg, 'VOLATILITY_SHOCK_ATR_PCT', 0.03)
         self._shock_reduction = getattr(_cfg, 'VOLATILITY_SHOCK_REDUCTION', 0.50)
@@ -255,13 +252,6 @@ class RiskManager:
             return self._shock_reduction
         return 1.0
 
-    # ── Gap / Slippage Buffer ─────────────────────────────────────────
-
-    def _apply_gap_buffer(self, notional: float) -> float:
-        """Reduce notional by the gap/slippage buffer fraction."""
-        reduced = notional * (1.0 - self._gap_buffer_pct)
-        return max(1.0, round(reduced, 2))
-
     # ── Position Sizing ────────────────────────────────────────────────
 
     def calculate_position_size(
@@ -270,7 +260,7 @@ class RiskManager:
         current_positions: Optional[list[dict]] = None,
     ) -> float:
         """Adaptive Stop-distance-based position sizing with tiered risk,
-        volatility shock protection, gap/slippage buffer, ML multiplier,
+        volatility shock protection, ML multiplier,
         and expectancy-based soft penalties.
 
         Returns the notional dollar amount to invest, scaled dynamically by
@@ -366,10 +356,7 @@ class RiskManager:
         notional *= expectancy_multiplier
         notional = max(1.0, round(notional, 2))
 
-        # 11. Gap / Slippage Buffer
-        notional = self._apply_gap_buffer(notional)
-
-        # 12. Apply Absolute Caps (max_notional must be the very last sizing step)
+        # 11. Apply Absolute Caps (max_notional must be the very last sizing step)
         notional = min(notional, account_equity * self.max_position_pct)
         notional = min(notional, self.max_notional)
         notional = max(1.0, round(notional, 2))
@@ -526,13 +513,14 @@ class RiskManager:
             return (False, f"Pending order guard: {self._ticker_map[signal.ticker]} already has an unfilled active order")
 
         # 1C. SPY/QQQ tradeable unit guard — highly correlated (0.95+), treat as single position
-        signal_resolved = self._resolve_ticker(signal.ticker)
-        if signal_resolved in SPY_QQQ_UNIT:
-            counterpart = "QQQ" if signal_resolved == "SPY" else "SPY"
-            if counterpart in position_symbols:
-                return (False, f"SPY/QQQ guard: {counterpart} already open; rejecting {signal.ticker} (0.95+ correlated)")
-            if counterpart in pending_order_symbols:
-                return (False, f"SPY/QQQ guard: {counterpart} has pending order; rejecting {signal.ticker}")
+        # [DISABLED per user request to increase trade volume/diversification]
+        # signal_resolved = self._resolve_ticker(signal.ticker)
+        # if signal_resolved in SPY_QQQ_UNIT:
+        #     counterpart = "QQQ" if signal_resolved == "SPY" else "SPY"
+        #     if counterpart in position_symbols:
+        #         return (False, f"SPY/QQQ guard: {counterpart} already open; rejecting {signal.ticker} (0.95+ correlated)")
+        #     if counterpart in pending_order_symbols:
+        #         return (False, f"SPY/QQQ guard: {counterpart} has pending order; rejecting {signal.ticker}")
 
         # 4. Total positions cap
         if len(current_positions) >= self.max_positions:

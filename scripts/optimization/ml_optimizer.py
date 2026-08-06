@@ -19,6 +19,7 @@ from src.strategies.trend_pullback import TrendPullbackStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
 from charts.data import fetch_ohlcv
 from src.backtester import simulate_trade
+from src.risk_manager import RiskManager
 
 # Set loggers
 logging.basicConfig(level=logging.CRITICAL, format='%(message)s')
@@ -34,8 +35,7 @@ OOS_LOOKBACK_DAYS = 30
 def load_data(months=6):
     configs = [
         ("SPY", "15m"),
-        ("QQQ", "15m"),
-        ("BTC-USD", "1h")
+        ("QQQ", "15m")
         # ("GLD", "4h"),
         # ("PDBC", "4h")
     ]
@@ -45,12 +45,11 @@ def load_data(months=6):
             DATA_CACHE[(ticker, tf)] = df
 
 def run_backtest_session(configs_strat, is_oos_mode="IS", account_size=5000.0, risk_pct=1.0):
-    RISK_DOLLARS = account_size * (risk_pct / 100.0)
     total_signals = 0
     total_pnl = 0.0
-    months = 6
+    months = 12
     
-    pnl_by_ticker = {"SPY": 0.0, "QQQ": 0.0, "BTC-USD": 0.0, "GLD": 0.0, "PDBC": 0.0}
+    pnl_by_ticker = {"SPY": 0.0, "QQQ": 0.0, "GLD": 0.0, "PDBC": 0.0}
     pnl_by_strategy = {"mean_reversion": 0.0, "trend_pullback": 0.0, "momentum_breakout": 0.0, "trend_following": 0.0}
     
     trades = []
@@ -90,7 +89,13 @@ def run_backtest_session(configs_strat, is_oos_mode="IS", account_size=5000.0, r
     all_signals.sort(key=lambda x: x['time'])
     
     active_trades = []
-    expectancy_history = {}
+    
+    risk_manager = RiskManager(
+        max_risk_pct=getattr(config, 'MAX_RISK_PCT', 0.01),
+        max_position_pct=getattr(config, 'MAX_POSITION_PCT', 5.0) / 100.0,
+        max_notional=50000.0,
+        max_positions=5,
+    )
     
     for sig_data in all_signals:
         signal_time = sig_data['time']
@@ -100,76 +105,38 @@ def run_backtest_session(configs_strat, is_oos_mode="IS", account_size=5000.0, r
         df = sig_data['df']
         entry_idx = sig_data['entry_idx']
         
-        # Process exits to maintain active list & expectancy stats
-        new_active = []
-        for t in active_trades:
-            if t['exit_time'] <= signal_time:
-                gate_key = (t['strategy_name'], t['direction'])
-                if gate_key not in expectancy_history:
-                    expectancy_history[gate_key] = []
-                expectancy_history[gate_key].append(t['r_multiple'])
-            else:
-                new_active.append(t)
-        active_trades = new_active
+        # Process exits to maintain active list
+        active_trades = [t for t in active_trades if t['exit_time'] > signal_time]
 
-        # VIX Filter Gate
-        vix = float(os.getenv("MOCK_VIX_LEVEL", "20.0"))
-        if vix > getattr(config, 'MAX_VIX_THRESHOLD', 30.0) and strategy_name == "mean_reversion":
+        # Build RiskManager-format position list and position_state
+        current_positions = [
+            {
+                "symbol": t["ticker"],
+                "side": t["side"],
+                "market_value": t["notional"],
+            }
+            for t in active_trades
+        ]
+        position_state = {
+            t["ticker"]: {
+                "entry_price": t["entry_price"],
+                "stop_loss": t["stop_loss"],
+                "qty": t["qty"]
+            }
+            for t in active_trades
+        }
+
+        # Call RiskManager.approve() — handles all gates (VIX, ML veto, macro, expectancy, heat)
+        approved, notional, reason = risk_manager.approve(
+            signal=signal,
+            account_equity=account_size,
+            current_positions=current_positions,
+            active_orders=[],
+            position_state=position_state,
+        )
+        if not approved:
             continue
-            
-        # ML Veto Gate
-        signal_risk_dollars = RISK_DOLLARS
-        if getattr(config, 'ML_VETO_ENABLED', True):
-            p = getattr(signal, 'confidence', 100) / 100.0
-            if p < 0.3:
-                # Strong disagreement -> veto
-                continue
-            elif 0.3 <= p < 0.45:
-                # Mild disagreement -> reduce position size
-                signal_risk_dollars *= 0.5
-            elif p > 0.6:
-                # Agreement -> slight size boost
-                signal_risk_dollars *= 1.2
 
-        # Macro Filter Gate
-        if getattr(config, 'MACRO_FILTER_ENABLED', True):
-            from src.macro_filter import MacroFilter
-            timestamp_now = signal_time.timestamp()
-            active_events = MacroFilter.check_event(timestamp_now)
-            should_skip = False
-            for event in active_events:
-                affected = event.get("affected_assets", [])
-                actions = event.get("actions", [])
-                normal_ticker = signal.ticker.replace("-USD", "")
-                normalized_affected = [a.replace("-USD", "") for a in affected]
-                if "all" in normalized_affected or normal_ticker in normalized_affected:
-                    if "no_new_entries" in actions or "flatten_intraday_only" in actions:
-                        should_skip = True
-                        break
-            if should_skip:
-                continue
-                
-        # Expectancy Gate
-        gate_key = (strategy_name, signal.direction)
-        past_r = expectancy_history.get(gate_key, [])
-        min_samples = getattr(config, 'MIN_EXPECTANCY_SAMPLES', 5)
-        min_expectancy = getattr(config, 'MIN_EXPECTANCY_R', 0.05)
-        if len(past_r) >= min_samples:
-            avg_r = sum(past_r) / len(past_r)
-            if avg_r < min_expectancy:
-                continue
-
-        # Portfolio Heat check
-        current_heat = sum(t['risk_pct'] for t in active_trades)
-        if current_heat + risk_pct > getattr(config, 'MAX_OPEN_PORTFOLIO_RISK_PCT', 0.02) * 100:
-            continue
-            
-        # SPY/QQQ Contention Guard
-        if ticker in ["SPY", "QQQ"]:
-            counterpart = "QQQ" if ticker == "SPY" else "SPY"
-            if any(t['ticker'] == counterpart for t in active_trades):
-                continue
-                
         # Simulate trade execution
         outcome, exit_price, bars, pnl_per_share = simulate_trade(df, entry_idx, signal)
         if outcome == 'NO_FILL':
@@ -177,25 +144,26 @@ def run_backtest_session(configs_strat, is_oos_mode="IS", account_size=5000.0, r
             
         exit_time = df.index[entry_idx + bars - 1] if (entry_idx + bars - 1) < len(df) else df.index[-1]
         
-        risk_per_share = abs(signal.entry - signal.stop_loss)
-        if risk_per_share == 0:
+        if signal.entry <= 0:
             continue
-            
-        qty = signal_risk_dollars / risk_per_share
-        max_qty = (account_size * getattr(config, 'MAX_POSITION_PCT', 1.0)) / signal.entry
-        qty = min(qty, max_qty)
         
+        qty = notional / signal.entry
         trade_pnl = pnl_per_share * qty
-        r_multiple = trade_pnl / signal_risk_dollars
         
         total_signals += 1
+        side = "long" if signal.direction == "BUY" else "short"
         active_trades.append({
             'ticker': ticker,
+            'symbol': ticker,
+            'side': side,
             'exit_time': exit_time,
+            'notional': notional,
+            'entry_price': signal.entry,
+            'stop_loss': signal.stop_loss,
+            'qty': qty,
             'risk_pct': risk_pct,
             'strategy_name': strategy_name,
             'direction': signal.direction,
-            'r_multiple': r_multiple
         })
         
         trades.append({'exit_time': exit_time, 'pnl': trade_pnl, 'ticker': ticker})
@@ -206,75 +174,39 @@ def run_backtest_session(configs_strat, is_oos_mode="IS", account_size=5000.0, r
     return total_pnl, total_signals, pnl_by_ticker, pnl_by_strategy, trades
 
 def objective(trial):
+    # Mean Reversion parameters
     mr_bb_std = trial.suggest_float("MR_BB_STD", 1.5, 3.0, step=0.1)
-    # mr_rsi_oversold = trial.suggest_float("MR_RSI_OVERSOLD", 20.0, 40.0, step=1.0)
-    # mr_rsi_overbought = trial.suggest_float("MR_RSI_OVERBOUGHT", 60.0, 80.0, step=1.0)
-    tp_bb_std = trial.suggest_float("TP_BB_STD", 1.5, 3.0, step=0.1)
-    mb_donchian_period = trial.suggest_int("MB_DONCHIAN_PERIOD", 36, 72)
-    
-    # tp_pullback_buffer = trial.suggest_float("TP_PULLBACK_BUFFER", 1.000, 1.050, step=0.001)
-    # mb_adx_threshold = trial.suggest_float("MB_ADX_THRESHOLD", 15.0, 35.0, step=1.0)
     mr_bb_period = trial.suggest_int("MR_BB_PERIOD", 10, 40)
     mr_rsi_period = trial.suggest_int("MR_RSI_PERIOD", 5, 20)
-    tp_bb_period = trial.suggest_int("TP_BB_PERIOD", 10, 40)
-    mb_compression_threshold = trial.suggest_int("MB_COMPRESSION_THRESHOLD", 50, 65, step=1)
-    
-    # mr_tp_target_mult = trial.suggest_float("MR_TP_TARGET_MULT", 0.5, 2.5, step=0.1)
+    mr_rsi_oversold = trial.suggest_float("MR_RSI_OVERSOLD", 20.0, 40.0, step=1.0)
+    mr_rsi_overbought = trial.suggest_float("MR_RSI_OVERBOUGHT", 60.0, 80.0, step=1.0)
+    mr_vol_spike_mult = trial.suggest_float("MR_VOL_SPIKE_MULT", 0.0, 2.0, step=0.1)
+    mr_vwap_dev_pct = trial.suggest_float("MR_VWAP_DEV_PCT", 0.001, 0.010, step=0.001)
 
-    # tf_ema_fast = trial.suggest_int("TF_EMA_FAST", 10, 25)
-    # tf_ema_slow = trial.suggest_int("TF_EMA_SLOW", 40, 60)
-    # tf_atr_target_mult = trial.suggest_float("TF_ATR_TARGET_MULT", 2.0, 5.0, step=0.1)
+    # Trend Pullback parameters
+    tp_bb_std = trial.suggest_float("TP_BB_STD", 1.5, 3.0, step=0.1)
+    tp_bb_period = trial.suggest_int("TP_BB_PERIOD", 10, 40)
+    tp_rsi_period = trial.suggest_int("TP_RSI_PERIOD", 5, 20)
     
     # Apply parameters to config
     config.MR_BB_STD = mr_bb_std
-    # config.MR_RSI_OVERSOLD = mr_rsi_oversold
-    # config.MR_RSI_OVERBOUGHT = mr_rsi_overbought
-    config.TP_BB_STD = tp_bb_std
-    config.MB_DONCHIAN_PERIOD = mb_donchian_period
-    
-    # config.TP_PULLBACK_BUFFER = tp_pullback_buffer
-    # config.MB_ADX_THRESHOLD = mb_adx_threshold
     config.MR_BB_PERIOD = mr_bb_period
     config.MR_RSI_PERIOD = mr_rsi_period
-    config.TP_BB_PERIOD = tp_bb_period
-    config.MB_COMPRESSION_THRESHOLD = mb_compression_threshold
+    config.MR_RSI_OVERSOLD = mr_rsi_oversold
+    config.MR_RSI_OVERBOUGHT = mr_rsi_overbought
+    config.MR_VOL_SPIKE_MULT = mr_vol_spike_mult
+    config.MR_VWAP_DEV_PCT = mr_vwap_dev_pct
     
-    # config.MR_TP_TARGET_MULT = mr_tp_target_mult
-
-    # config.GLD_EMA_FAST = tf_ema_fast
-    # config.PDBC_EMA_FAST = tf_ema_fast
-    # config.TF_EMA_SLOW = tf_ema_slow
-    # config.TF_ATR_TARGET_MULT = tf_atr_target_mult
-
-    # ⛏️ GLD-specific tuning parameters ⛏️
-    # gld_stop_mult = trial.suggest_float("GLD_STOP_MULT", 2.0, 4.0, step=0.1)
-    # gld_trend_filter = trial.suggest_categorical("GLD_TREND_FILTER", ["HTF", "ADX", "BOTH"])
-    # gld_pullback_trigger = trial.suggest_categorical("GLD_PULLBACK_TRIGGER", ["enabled", "disabled"])
-
-    # 🛢️ PDBC-specific tuning parameters 🛢️
-    # pdbc_stop_mult = trial.suggest_float("PDBC_STOP_MULT", 2.0, 4.0, step=0.1)
-    # pdbc_adx_min = trial.suggest_float("PDBC_ADX_MIN", 20.0, 30.0, step=1.0)
-    # pdbc_range_expansion_threshold = trial.suggest_float(
-    #     "PDBC_RANGE_EXPANSION_THRESHOLD", 0.5, 1.0, step=0.05
-    # )
-
-    # Apply GLD parameters to config
-    # config.GLD_STOP_MULT = gld_stop_mult
-    # config.GLD_TREND_FILTER = gld_trend_filter
-    # config.GLD_PULLBACK_TRIGGER = gld_pullback_trigger
-
-    # Apply PDBC parameters to config
-    # config.PDBC_STOP_MULT = pdbc_stop_mult
-    # config.PDBC_ADX_MIN = pdbc_adx_min
-    # config.PDBC_RANGE_EXPANSION_THRESHOLD = pdbc_range_expansion_threshold
+    config.TP_BB_STD = tp_bb_std
+    config.TP_BB_PERIOD = tp_bb_period
+    config.TP_RSI_PERIOD = tp_rsi_period
 
     # Pre-instantiate strategies to save time
     configs_strat = [
         ("SPY", "15m", MeanReversionStrategy()),
         ("QQQ", "15m", MeanReversionStrategy()),
         ("SPY", "15m", TrendPullbackStrategy()),
-        ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy())
+        ("QQQ", "15m", TrendPullbackStrategy())
         # ("GLD", "4h", TrendFollowingStrategy()),
         # ("PDBC", "4h", TrendFollowingStrategy())
     ]
@@ -351,7 +283,6 @@ def objective(trial):
         
     trial.set_user_attr("SPY_PnL", pnl_by_ticker["SPY"])
     trial.set_user_attr("QQQ_PnL", pnl_by_ticker["QQQ"])
-    trial.set_user_attr("BTC_PnL", pnl_by_ticker["BTC-USD"])
     # trial.set_user_attr("GLD_PnL", pnl_by_ticker.get("GLD", 0.0))
     # trial.set_user_attr("PDBC_PnL", pnl_by_ticker.get("PDBC", 0.0))
     trial.set_user_attr("MR_PnL", pnl_by_strategy["mean_reversion"])
@@ -404,8 +335,7 @@ def evaluate_oos_params(best_params):
         ("SPY", "15m", MeanReversionStrategy()),
         ("QQQ", "15m", MeanReversionStrategy()),
         ("SPY", "15m", TrendPullbackStrategy()),
-        ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy())
+        ("QQQ", "15m", TrendPullbackStrategy())
         # ("GLD", "4h", TrendFollowingStrategy()),
         # ("PDBC", "4h", TrendFollowingStrategy())
     ]
@@ -440,7 +370,6 @@ if __name__ == "__main__":
     print("Best Score (Penalized PnL):", best_trial.value)
     print("SPY PnL:", best_trial.user_attrs.get("SPY_PnL"))
     print("QQQ PnL:", best_trial.user_attrs.get("QQQ_PnL"))
-    print("BTC PnL:", best_trial.user_attrs.get("BTC_PnL"))
     # print("GLD PnL:", best_trial.user_attrs.get("GLD_PnL"))
     # print("PDBC PnL:", best_trial.user_attrs.get("PDBC_PnL"))
     print("Total Trades:", best_trial.user_attrs.get("Total_Trades"))
@@ -451,7 +380,6 @@ if __name__ == "__main__":
     print("OOS Total Trades:", oos_trades)
     print("OOS SPY PnL:", oos_pnl_by_ticker["SPY"])
     print("OOS QQQ PnL:", oos_pnl_by_ticker["QQQ"])
-    print("OOS BTC PnL:", oos_pnl_by_ticker["BTC-USD"])
     # print("OOS GLD PnL:", oos_pnl_by_ticker.get("GLD", 0.0))
     # print("OOS PDBC PnL:", oos_pnl_by_ticker.get("PDBC", 0.0))
     print("=" * 50)

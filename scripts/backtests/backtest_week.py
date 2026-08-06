@@ -8,7 +8,6 @@ logging.basicConfig(level=logging.CRITICAL, format='%(message)s')
 sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
 
 from src.strategies.mean_reversion import MeanReversionStrategy
-from src.strategies.momentum_breakout import MomentumBreakoutStrategy
 from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.trend_pullback import TrendPullbackStrategy
 import src.regime_classifier
@@ -29,7 +28,6 @@ def run_backtest():
         ("SPY", "15m", TrendPullbackStrategy()),
         ("QQQ", "15m", MeanReversionStrategy()),
         ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy()),
         ("GLD", "4h", TrendFollowingStrategy()),
         ("PDBC", "4h", TrendFollowingStrategy())
     ]

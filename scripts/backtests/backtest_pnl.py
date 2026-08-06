@@ -11,7 +11,6 @@ load_dotenv()
 import config
 
 from src.strategies.mean_reversion import MeanReversionStrategy
-from src.strategies.momentum_breakout import MomentumBreakoutStrategy
 from src.strategies.trend_pullback import TrendPullbackStrategy
 import src.regime_classifier
 src.regime_classifier.HMM_AVAILABLE = False
@@ -27,7 +26,7 @@ logging.getLogger("src.strategies").setLevel(logging.CRITICAL)
 logging.getLogger("charts.data").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 
-def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
+def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=3):
     if os.path.exists("data/best_ml_params.json") or os.path.exists("data/best_risk_params.json"):
         print("-> Loading optimized parameters from ML/Risk configs automatically via config.py...")
         # Since config.py loads them directly, we don't need to manually re-apply them here.
@@ -43,8 +42,7 @@ def run_pnl_backtest(account_size=5000.0, risk_pct=1.0, months=6):
         ("SPY", "15m", MeanReversionStrategy()),
         ("QQQ", "15m", MeanReversionStrategy()),
         ("SPY", "15m", TrendPullbackStrategy()),
-        ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy())
+        ("QQQ", "15m", TrendPullbackStrategy())
     ]
     
     days = 30 * months

@@ -81,7 +81,7 @@ def _estimate_ou_half_life(
     # Measurement vector:  H_k = [1, S_{k-1}]
 
     # Process noise covariance (random walk prior — near-constant state)
-    Q = np.eye(2) * 1e-6
+    Q = np.eye(2) * 1e-4
 
     # Observation noise variance — a fraction of the data variance,
     # corresponding to the AR(1) innovation variance.
@@ -115,14 +115,15 @@ def _estimate_ou_half_life(
 
     # Edge cases — non-stationary or non-reverting dynamics
     #   β >= 1  → explosive (unit root or worse)
-    #   β <= 0  → not mean-reverting (white noise or oscillatory)
+    #   β <= -0.2 → allow slight oscillatory mean reversion, but reject extreme noise
     if beta >= 1.0:
         return None
-    if beta <= 0.0:
+    if beta <= -0.2:
         return None
 
-    # Exact discrete-time half-life for AR(1): β^H = 0.5
-    half_life = -np.log(2.0) / np.log(beta)
+    # Exact discrete-time half-life for AR(1) envelope: |β|^H = 0.5
+    # Use abs(beta) so oscillatory mean reversion (beta < 0) calculates correctly
+    half_life = -np.log(2.0) / np.log(abs(beta))
 
     # Bounds check — half-life must be meaningful for intraday mean reversion
     if half_life < 5.0 or half_life > 50.0:
@@ -132,7 +133,7 @@ def _estimate_ou_half_life(
 
 
 # Minimum bars required for Kalman filter to converge
-MR_MIN_BARS = 100                   # Kalman filter requires 82 bars; use 100 as margin
+MR_MIN_BARS = getattr(config, 'MR_MIN_BARS', 100)  # Kalman filter requires 82 bars; use 100 as margin
 
 class MeanReversionStrategy(BaseStrategy):
     """True intraday mean-reversion strategy for S&P 500 and NASDAQ indices.
@@ -207,40 +208,73 @@ class MeanReversionStrategy(BaseStrategy):
         # -- VWAP Deviation ----------------------------------------------
         vwap_dev = (current_close - current_vwap) / current_vwap
 
-        # -- Trigger Rules -----------------------------------------------
+        # -- Trigger Rules (Fast Checks First) ---------------------------
         direction: Optional[str] = None
 
-        if z_score < -config.MR_BB_STD and vwap_dev < -0.005:
+        mr_vwap_dev_pct = getattr(config, 'MR_VWAP_DEV_PCT', 0.005)
+        if z_score < -config.MR_BB_STD and vwap_dev < -mr_vwap_dev_pct and current_rsi < config.MR_RSI_OVERSOLD:
             direction = "BUY"
-        elif z_score > config.MR_BB_STD and vwap_dev > 0.005:
+        elif z_score > config.MR_BB_STD and vwap_dev > mr_vwap_dev_pct and current_rsi > config.MR_RSI_OVERBOUGHT:
             direction = "SELL"
 
         if direction is None:
+            return None
+
+        # -- Institutional Filters: Kalman Regime & Volume Capitulation ---
+        detrended = np.log(close).dropna().to_numpy()
+        half_life = _estimate_ou_half_life(detrended)
+        
+        # 1. Statistical Regime Gate (OU Process)
+        # If the Kalman filter AR(1) state shows the series is explosive (trending) 
+        # rather than mean-reverting, we block the trade.
+        if half_life is None:
+            logger.debug("%s %s: Kalman filter indicates non-reverting regime, skipping.", self.name, ticker)
+            return None
+
+        # 2. Volume Capitulation Gate
+        # Institutional sweeps cause volume spikes at extremes. Low-volume drift is a trap.
+        avg_volume = float(df["Volume"].rolling(config.MR_BB_PERIOD).mean().iloc[-1])
+        current_volume = float(df["Volume"].iloc[-1])
+        vol_multiplier = config.MR_VOL_SPIKE_MULT if config.MR_VOL_SPIKE_MULT > 0 else 1.25
+        
+        if current_volume < (avg_volume * vol_multiplier):
+            logger.debug("%s %s: Insufficient volume capitulation (Vol: %d < Avg: %d * %.2f)", self.name, ticker, current_volume, avg_volume, vol_multiplier)
             return None
 
         # -- Entry / Exit -----------------------------------------------
         entry = current_close
         order_type = "LIMIT" if config.USE_LIMIT_ORDERS_MR else "MARKET"
 
-        # Target is VWAP
-        target_price = current_vwap
+        # Target the SMA20 (Bollinger Band mean) — this is the statistical
+        # center the Z-score measures deviation from, so it is the natural
+        # mean-reversion target.  Previously we used min/max(VWAP, SMA20)
+        # which picked the *closer* mean, producing tiny TP distances that
+        # — combined with the stop clamp below — created stops tight enough
+        # to get hit on noise, destroying expectancy.
+        target_price = current_sma20
 
+        # Stop Loss: use the raw ATR-based distance.  The old code clamped
+        # stop_distance to tp_distance * 1.5, which created artificially
+        # tight stops (often < 0.2% of price) that were hit on random noise
+        # before the reversion could play out.  The MR_MIN_RR gate below
+        # still filters trades whose R:R is unacceptable.
         stop_distance = config.MR_STOP_MULT * atr_val
+
         stop_loss = entry - stop_distance if direction == "BUY" else entry + stop_distance
 
         take_profit = target_price
-
-        # R/R gate: TP must meet the minimum R/R ratio to survive slippage
-        tp_distance = abs(take_profit - entry)
+        tp_distance = abs(target_price - entry)
         sl_distance = abs(entry - stop_loss)
 
+        # Directional sanity check — TP must be on the correct side of entry
         if (direction == "BUY" and take_profit <= entry) or (direction == "SELL" and take_profit >= entry):
             return None
 
+        # R/R quality gate (tp_distance is already computed above from target_price)
         if tp_distance < sl_distance * config.MR_MIN_RR:
             logger.debug(
-                "%s %s: bad R/R (entry=%.2f, SL=%.2f, TP=%.2f)",
-                self.name, ticker, entry, stop_loss, take_profit,
+                "%s %s: bad R/R (entry=%.2f, SL=%.2f, TP=%.2f, ratio=%.2f) < %.2f",
+                self.name, ticker, entry, stop_loss, take_profit, (tp_distance / sl_distance if sl_distance > 0 else 0), config.MR_MIN_RR
             )
             return None
 
@@ -257,20 +291,12 @@ class MeanReversionStrategy(BaseStrategy):
         trail_logic = "vwap"
 
         # -- OU Half-Life Dynamic Time Stop -----------------------------
-        detrended = np.log(close).dropna().to_numpy()
-        half_life = _estimate_ou_half_life(detrended)
-        if half_life is not None:
-            time_stop_bars = max(5, min(100, int(np.ceil(2.0 * half_life))))
-            logger.debug(
-                "%s %s: OU half-life=%.1f bars \u2192 time_stop=%d bars",
-                self.name, ticker, half_life, time_stop_bars,
-            )
-        else:
-            time_stop_bars = 6
-            logger.debug(
-                "%s %s: OU half-life N/A \u2192 time_stop=%d bars (fallback)",
-                self.name, ticker, time_stop_bars,
-            )
+        # half_life is pre-calculated in the institutional filter above
+        time_stop_bars = max(5, min(100, int(np.ceil(2.0 * half_life))))
+        logger.debug(
+            "%s %s: OU half-life=%.1f bars \u2192 time_stop=%d bars",
+            self.name, ticker, half_life, time_stop_bars,
+        )
 
         # -- Record signal ----------------------------------------------
         self.record_signal(ticker)

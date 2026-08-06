@@ -226,9 +226,9 @@ def run_stateful_backtest(strategies_to_test: list, days_to_test: int, starting_
     print(f"Starting equity:   ${starting_equity:>10,.2f}")
     print()
 
-    print("RegimeClassifier: fitting on SPY (2y/1d)...", end=" ")
+    print("RegimeClassifier: fitting on SPY (1y/1d)...", end=" ")
     regime_classifier = RegimeClassifier(n_states=3)
-    spy_df = fetch_ohlcv("SPY", period="2y", interval="1d", end_date=end_date)
+    spy_df = fetch_ohlcv("SPY", period="1y", interval="1d", end_date=end_date)
     if spy_df is not None and not spy_df.empty:
         last_spy_ts = spy_df.index[-1]
         start_timestamp = last_spy_ts - timedelta(days=days_to_test)
@@ -243,17 +243,22 @@ def run_stateful_backtest(strategies_to_test: list, days_to_test: int, starting_
         print("failed (no SPY data).")
 
     # ════════════════════════════════════════════════════════════════════
-    # 2. Pre-fetch historical data for all unique (ticker, timeframe) with 1y horizon
+    # 2. Pre-fetch historical data for all unique (ticker, timeframe) with dynamic horizon
     # ════════════════════════════════════════════════════════════════════
     ticker_data: dict[tuple[str, str], tuple[pd.DataFrame, int]] = {}
+
+    # Calculate exactly how many months we need to fetch: 
+    # days_to_test + roughly 30-40 days for the 750 bar buffer.
+    required_months = (days_to_test // 30) + 2
+    period_str = f"{required_months}mo"
 
     for ticker, tf, strategy in strategies_to_test:
         key = (ticker, tf)
         if key in ticker_data:
             continue
 
-        print(f"  Fetching {ticker} ({tf}, period=1y)...", end=" ")
-        df = fetch_ohlcv(ticker, period="1y", interval=tf, end_date=end_date)
+        print(f"  Fetching {ticker} ({tf}, period={period_str})...", end=" ")
+        df = fetch_ohlcv(ticker, period=period_str, interval=tf, end_date=end_date)
         if df is None or len(df) < 50:
             print("SKIPPED (insufficient data)")
             continue
@@ -294,7 +299,10 @@ def run_stateful_backtest(strategies_to_test: list, days_to_test: int, starting_
         logging.getLogger("charts.data").setLevel(logging.CRITICAL)
 
         for i in range(test_start_idx, len(df) - 1):
-            window_df = df.iloc[: i + 1]
+            # Limit lookback to 2500 bars to dramatically speed up backtesting
+            # while preserving enough history for VWAP, VP_WINDOW (100) and Kalman filter (15m equities = 250 bars)
+            start_idx = max(0, i + 1 - 250)
+            window_df = df.iloc[start_idx : i + 1]
             signal = strategy.analyze(window_df, ticker)
             if signal is not None:
                 all_signals.append({

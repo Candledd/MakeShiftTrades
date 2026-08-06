@@ -361,10 +361,11 @@ class MomentumBreakoutStrategy(BaseStrategy):
         if vpin_confirmed:
             confidence += 15
 
-        # Clean break — price more than 0.5 % beyond the channel
-        if direction == "BUY" and current_close > current_upper * 1.005:
+        # Clean break — price more than channel buffer beyond the channel
+        mb_channel_buffer = getattr(config, 'MB_CHANNEL_BUFFER_PCT', 0.005)
+        if direction == "BUY" and current_close > current_upper * (1 + mb_channel_buffer):
             confidence += 10
-        elif direction == "SELL" and current_close < current_lower * 0.995:
+        elif direction == "SELL" and current_close < current_lower * (1 - mb_channel_buffer):
             confidence += 10
 
         # All of the last 3 candles closed in the same direction
@@ -418,6 +419,6 @@ class MomentumBreakoutStrategy(BaseStrategy):
             atr=current_atr,
             timestamp=datetime.now(timezone.utc),
             fat_tail_scalar=fat_tail_scalar,
-            time_stop_bars=10,
+            time_stop_bars=int(getattr(config, 'TIME_STOP_CRYPTO_HOURS', 10)),
             trailing_stop_logic="donchian",
         )

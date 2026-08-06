@@ -235,7 +235,7 @@ except ValueError:
     raise ValueError("MR_TP_TARGET_MULT must be a valid number")
 
 try:
-    MR_MIN_RR = float(get_config_val("MR_MIN_RR", "1.7599"))
+    MR_MIN_RR = float(get_config_val("MR_MIN_RR", "0.6"))
 except ValueError:
     raise ValueError("MR_MIN_RR must be a valid number")
 

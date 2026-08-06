@@ -11,7 +11,6 @@ load_dotenv()
 import config
 
 from src.strategies.mean_reversion import MeanReversionStrategy
-from src.strategies.momentum_breakout import MomentumBreakoutStrategy
 from src.strategies.trend_pullback import TrendPullbackStrategy
 import src.regime_classifier
 src.regime_classifier.HMM_AVAILABLE = False
@@ -37,7 +36,6 @@ def run_backtest():
         ("SPY", "15m", TrendPullbackStrategy()),
         ("QQQ", "15m", MeanReversionStrategy()),
         ("QQQ", "15m", TrendPullbackStrategy()),
-        ("BTC-USD", "1h", MomentumBreakoutStrategy()),
     ]
     
     run_stateful_backtest(strategies_to_test, days=1)
