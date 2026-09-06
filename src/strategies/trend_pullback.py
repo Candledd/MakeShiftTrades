@@ -70,6 +70,15 @@ class TrendPullbackStrategy(BaseStrategy):
             logger.debug("%s: too few bars (%d)", self.name, len(df))
             return None
 
+        # ── RTH Gate: Trade strictly during Regular Market Hours (09:45–15:45 ET) ──
+        if ticker.upper() in ("SPY", "QQQ"):
+            bar_ts = df.index[-1]
+            bar_ny = bar_ts.tz_convert("America/New_York").time() if bar_ts.tzinfo is not None else bar_ts.time()
+            from datetime import time as dt_time
+            if bar_ny < dt_time(9, 45) or bar_ny > dt_time(15, 45):
+                logger.debug("%s %s: outside regular trading hours (%s), skipping", self.name, ticker, bar_ny)
+                return None
+
         close = df["Close"]
         high = df["High"]
         low = df["Low"]
@@ -82,15 +91,15 @@ class TrendPullbackStrategy(BaseStrategy):
         current_ema50 = float(ema50.iloc[-1])
         if float(close.iloc[-1]) < current_ema50:
             return None
+        if len(ema50) >= 5 and (ema50.iloc[-1] < ema50.iloc[-5]):
+            logger.debug("%s: %s EMA50 slope is downward (skipping)", self.name, ticker)
+            return None
 
         # -- HTF trend routing -------------------------------------------
-        htf_trend = self.get_htf_trend(ticker)
-        if htf_trend is None:
-            # Map None (unable to determine HTF trend) to neutral intentionally
-            htf_trend = "neutral"
-
-        if htf_trend == "bearish":
-            logger.debug("%s: %s HTF trend is bearish (skipping)", self.name, ticker)
+        bar_ts = df.index[-1]
+        htf_trend = self.get_htf_trend(ticker, as_of=bar_ts)
+        if htf_trend != "bullish":
+            logger.debug("%s: %s HTF trend is not bullish (%s) (skipping)", self.name, ticker, htf_trend)
             return None
 
         # -- Bollinger Bands ---------------------------------------------
@@ -107,8 +116,14 @@ class TrendPullbackStrategy(BaseStrategy):
         rs = avg_gain / avg_loss
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        # -- VWAP --------------------------------------------------------
-        vwap = (close * volume).cumsum() / volume.cumsum()
+        # -- VWAP (session-anchored intraday VWAP) -----------------------
+        if df.index.tz is not None:
+            session_dates = df.index.tz_convert("America/New_York").date
+        else:
+            session_dates = df.index.date
+        cum_pv = (close * volume).groupby(session_dates).cumsum()
+        cum_vol = volume.groupby(session_dates).cumsum()
+        vwap = cum_pv / cum_vol.replace(0, np.nan)
 
         # -- Current values (last bar) -----------------------------------
         current_close = float(close.iloc[-1])
@@ -156,19 +171,17 @@ class TrendPullbackStrategy(BaseStrategy):
         order_type = "MARKET"
         stop_loss = self.compute_stop_loss(entry, direction, atr=atr_val)
 
-        # Take-profit: Realistic target based on ATR or SMA
-        # Limit VWAP/VA impact so we don't get unrealistic R/R ratios that never hit
-        tp_price_based = max(current_sma20, entry + 2.5 * atr_val) if current_sma20 > entry else entry + 2.5 * atr_val
-        take_profit = min(tp_price_based, entry + 4.0 * atr_val)
+        # Take-profit: Realistic structural target based on SMA20 and stop distance
+        sl_distance = abs(entry - stop_loss)
+        min_tp_dist = sl_distance * config.TP_MIN_RR
+        tp_target = max(entry + min_tp_dist, current_sma20)
+        take_profit = min(tp_target, entry + 2.5 * atr_val)
 
-        
         if take_profit <= entry:
             logger.debug("%s %s: inverted TP/Entry (TP=%.2f <= Entry=%.2f)", self.name, ticker, take_profit, entry)
             return None
 
-        # R/R gate: require dynamic minimum R/R to survive slippage
         tp_distance = take_profit - entry
-        sl_distance = entry - stop_loss
         if tp_distance < sl_distance * config.TP_MIN_RR:
             logger.debug(
                 "%s %s: poor R/R (entry=%.2f, SL=%.2f, TP=%.2f)",
@@ -230,7 +243,11 @@ class TrendPullbackStrategy(BaseStrategy):
         )
 
         # -- Record signal ----------------------------------------------
-        self.record_signal(ticker)
+        self.record_signal(ticker, timestamp=bar_ts)
+
+        sig_timestamp = bar_ts if isinstance(bar_ts, datetime) else datetime.now(timezone.utc)
+        if sig_timestamp.tzinfo is None:
+            sig_timestamp = sig_timestamp.replace(tzinfo=timezone.utc)
 
         return StrategySignal(
             ticker=ticker,
@@ -243,8 +260,8 @@ class TrendPullbackStrategy(BaseStrategy):
             timeframe=self.timeframe,
             reason=reason,
             atr=round(atr_val, 4),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=sig_timestamp,
             order_type=order_type,
-            time_stop_bars=10,
+            time_stop_bars=24,
             trailing_stop_logic="sma20_or_ema",
         )

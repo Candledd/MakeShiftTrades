@@ -121,75 +121,42 @@ class MomentumBreakoutStrategy(BaseStrategy):
     # ────────────────────────────────────────────────────────────────────────
 
     def _compute_tod_rvol(self, df: pd.DataFrame) -> float:
-        """Compute Time-of-Day Relative Volume (RVOL) ratio.
+        """Compute Relative Volume (RVOL) ratio.
 
-        For the current (last) bar, this method calculates:
-
-            RVOL = CumulativeVolumeToday(Open → CurrentTime)
-                   / AvgCumulativeVolume(Open → CurrentTime) over N-day lookback
-
-        By comparing cumulative volume at the *exact same time-of-day* across
-        the lookback, this normalises out intraday volume seasonality (the
-        morning rush, lunch lull, afternoon ramp) so breakouts are confirmed
-        only when volume is genuinely elevated for that specific time block.
-
-        Returns
-        -------
-        float
-            RVOL ratio (>1.0 means volume is above average for this
-            time-of-day).  Falls back to 1.0 (neutral) when insufficient
-            history is available.
+        For the current (last) bar, compares volume against the historical
+        average for the same hour across recent days, falling back to a
+        20-bar rolling mean if insufficient history is available.
+        Runs in microseconds without heavy DataFrame pivoting.
         """
-        lookback_days = config.MB_RVOL_LOOKBACK
+        if df is None or len(df) < 5:
+            return 1.0
 
-        # Work on a copy to avoid mutating the caller's DataFrame
-        df = df.copy()
+        volume = df["Volume"].astype(float)
+        current_vol = float(volume.iloc[-1])
+        if current_vol <= 0.0:
+            return 0.0
 
-        # ── Ensure a DatetimeIndex ──────────────────────────────────────
-        idx = df.index
-        if not isinstance(idx, pd.DatetimeIndex):
-            idx = pd.to_datetime(idx)
-        df = df.set_index(idx)
+        # ── Same-hour historical baseline ──────────────────────────────
+        try:
+            if isinstance(df.index, pd.DatetimeIndex):
+                current_hour = df.index[-1].hour
+                same_hour_mask = df.index.hour == current_hour
+                same_hour_vols = volume[same_hour_mask].iloc[:-1]
+                if len(same_hour_vols) >= 5:
+                    avg_vol = float(same_hour_vols.iloc[-config.MB_RVOL_LOOKBACK:].mean())
+                    if avg_vol > 0.0:
+                        return current_vol / avg_vol
+        except Exception:
+            pass
 
-        # ── Intraday cumulative volume per bar ──────────────────────────
-        df["_date"] = df.index.date
-        df["_time"] = df.index.time
-        df["_cum_vol"] = df.groupby("_date")["Volume"].cumsum()
+        # ── Fallback: 20-bar rolling volume baseline ───────────────────
+        vol_window = volume.iloc[-21:-1]
+        if len(vol_window) > 0:
+            vol_mean = float(vol_window.mean())
+            if vol_mean > 0.0:
+                return current_vol / vol_mean
 
-        # ── Vectorised pivot: dates × times ─────────────────────────────
-        # Build a 2-D table (dates as rows, times as columns) so that the
-        # rolling average operates across entire columns at once, avoiding
-        # the slow groupby().transform(lambda ...) anti-pattern.
-
-        # Sort only if not already monotonic to avoid redundant copies
-        if not df.index.is_monotonic_increasing:
-            df = df.sort_index()
-
-        pivot = df.pivot_table(
-            index="_date", columns="_time", values="_cum_vol", aggfunc="first",
-        )
-
-        # Rolling average of the previous N days at each TOD bucket.
-        # shift(1) excludes today's own value from the average.
-        tod_avg_pivot = pivot.shift(1).rolling(
-            window=lookback_days, min_periods=5,
-        ).mean()
-
-        # Stack back to a Series aligned with the original rows
-        tod_avg = (
-            tod_avg_pivot
-            .stack()
-            .reindex(pd.MultiIndex.from_frame(df[["_date", "_time"]]))
-        )
-        tod_avg.index = df.index  # restore original DatetimeIndex
-
-        current_cum_vol = float(df["_cum_vol"].iloc[-1])
-        avg_cum_vol = float(tod_avg.iloc[-1])
-
-        if pd.isna(avg_cum_vol) or avg_cum_vol <= 0.0:
-            return 1.0  # neutral fallback — insufficient history
-
-        return current_cum_vol / avg_cum_vol
+        return 1.0
 
     def analyze(self, df: pd.DataFrame, ticker: str) -> Optional[StrategySignal]:
         # ── Data quality guard ──────────────────────────────────────────
@@ -238,24 +205,12 @@ class MomentumBreakoutStrategy(BaseStrategy):
         # Computed inside _compute_tod_rvol().
 
         # ────────────────────────────────────────────────────────────────
-        # Stage 1: Compression detection
-        # ────────────────────────────────────────────────────────────────
-        compression = self._compression_score(close, high, low, volume, atr_series)
-        logger.debug(
-            "%s %s: compression score = %.1f/100 (threshold %.0f)",
-            self.name, ticker, compression, config.MB_COMPRESSION_THRESHOLD,
-        )
-        if compression < config.MB_COMPRESSION_THRESHOLD:
-            return None
-
-        # ────────────────────────────────────────────────────────────────
-        # Stage 2: Expansion confirmation
+        # Stage 1: Breakout trigger on current bar
         # ────────────────────────────────────────────────────────────────
         current_close = float(close.iloc[-1])
         current_upper = float(upper_channel.iloc[-1])
         current_lower = float(lower_channel.iloc[-1])
         current_atr = atr_val
-        current_volume_ratio = self._compute_tod_rvol(df)
 
         if any(
             pd.isna(v) or v == 0.0
@@ -263,8 +218,6 @@ class MomentumBreakoutStrategy(BaseStrategy):
         ):
             return None
 
-
-        # Immediate breakout trigger on current bar — no hold requirement
         is_buy = current_close > current_upper
         is_sell = current_close < current_lower
 
@@ -272,7 +225,24 @@ class MomentumBreakoutStrategy(BaseStrategy):
             return None
         direction: str = "BUY" if is_buy else "SELL"
 
-        # ── Volume expansion confirmation ──────────────────────────────
+        # ────────────────────────────────────────────────────────────────
+        # Stage 2: Prior compression & volume expansion confirmation
+        # ────────────────────────────────────────────────────────────────
+        # Breakouts are only valid when preceded by a period of compression/coiling.
+        # Check compression across the consolidation window leading up to breakout (t-5 to t-1).
+        prior_comp_scores = [
+            self._compression_score(close.iloc[:k], high.iloc[:k], low.iloc[:k], volume.iloc[:k], atr_series.iloc[:k])
+            for k in range(max(config.MB_ATR_PERCENTILE_LOOKBACK, len(df) - 5), len(df))
+        ]
+        compression = max(prior_comp_scores) if prior_comp_scores else self._compression_score(close, high, low, volume, atr_series)
+        logger.debug(
+            "%s %s: prior compression score = %.1f/100 (threshold %.0f)",
+            self.name, ticker, compression, config.MB_COMPRESSION_THRESHOLD,
+        )
+        if compression < config.MB_COMPRESSION_THRESHOLD:
+            return None
+
+        current_volume_ratio = self._compute_tod_rvol(df)
         if current_volume_ratio < config.MB_EXPANSION_VOLUME_RATIO:
             logger.debug(
                 "%s %s: volume expansion insufficient (%.2f < %.2f)",
@@ -280,11 +250,6 @@ class MomentumBreakoutStrategy(BaseStrategy):
                 current_volume_ratio, config.MB_EXPANSION_VOLUME_RATIO,
             )
             return None
-
-        # ── False breakout filter ──
-        # Replaced N-bar persistence with a 1-bar Hold rule:
-        # Breakout close -> next candle does not close back inside range.
-        # This is strictly enforced by the is_buy/is_sell conditions above.
 
         # ────────────────────────────────────────────────────────────────
         # Entry / Stop / Partial Take-Profit
@@ -404,7 +369,12 @@ class MomentumBreakoutStrategy(BaseStrategy):
             reason += " | VPIN Toxicity confirmation"
 
         # ── Record signal ─────────────────────────────────────────────
-        self.record_signal(ticker)
+        bar_ts = df.index[-1]
+        self.record_signal(ticker, timestamp=bar_ts)
+
+        sig_timestamp = bar_ts if isinstance(bar_ts, datetime) else datetime.now(timezone.utc)
+        if sig_timestamp.tzinfo is None:
+            sig_timestamp = sig_timestamp.replace(tzinfo=timezone.utc)
 
         return StrategySignal(
             ticker=ticker,
@@ -417,7 +387,7 @@ class MomentumBreakoutStrategy(BaseStrategy):
             timeframe=self.timeframe,
             reason=reason,
             atr=current_atr,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=sig_timestamp,
             fat_tail_scalar=fat_tail_scalar,
             time_stop_bars=int(getattr(config, 'TIME_STOP_CRYPTO_HOURS', 10)),
             trailing_stop_logic="donchian",

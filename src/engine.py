@@ -106,13 +106,13 @@ class TradingEngine:
         # Scan manifest — (ticker, strategy, interval)
         # SPY/QQQ run through BOTH mean_rev and pullback strategies.
         self.instruments = [
-            # {"ticker": "SPY", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
+            {"ticker": "SPY", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
             {"ticker": "SPY", "strategy": self.pullback, "interval_seconds": 900, "last_scan": 0},
-            # {"ticker": "QQQ", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
+            {"ticker": "QQQ", "strategy": self.mean_rev, "interval_seconds": 900, "last_scan": 0},
             {"ticker": "QQQ", "strategy": self.pullback, "interval_seconds": 900, "last_scan": 0},
-            # {"ticker": "BTC-USD", "strategy": self.momentum, "interval_seconds": 3600, "last_scan": 0},
-            # {"ticker": "GLD", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
-            # {"ticker": "PDBC", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
+            {"ticker": "BTC-USD", "strategy": self.momentum, "interval_seconds": 3600, "last_scan": 0},
+            {"ticker": "GLD", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
+            {"ticker": "PDBC", "strategy": self.trend, "interval_seconds": 14400, "last_scan": 0},
         ]
 
         # Save base intervals for adaptive scanning
@@ -1015,6 +1015,9 @@ class TradingEngine:
             st['side'] = signal.direction
             st['strategy'] = signal.strategy_name
             st['regime'] = self._get_signal_regime(signal.ticker)
+            st['open_ts'] = time.time()
+            st['highest'] = signal.entry
+            st['lowest'] = signal.entry
             # time_stop_bars is already set strategy-specifically by each strategy's analyze()
             st['time_stop_bars'] = signal.time_stop_bars
             st['trailing_stop_logic'] = getattr(signal, 'trailing_stop_logic', 'default')

@@ -52,6 +52,8 @@ def simulate_trade(df, entry_idx, signal):
     qty_left = 1.0
     partial_taken = False
     current_sl = signal.stop_loss
+    highest_price = float(signal.entry)
+    lowest_price = float(signal.entry)
     net_pnl_per_share = 0.0
     
     slippage_pct = getattr(config, 'BACKTEST_SLIPPAGE_FRICTION_PCT', 0.0005)
@@ -120,6 +122,8 @@ def simulate_trade(df, entry_idx, signal):
                 partial_taken = True
                 
             # Always calculate trailing stops (not just after partial TP)
+            highest_price = max(highest_price, high)
+            lowest_price = min(lowest_price, low)
             current_sl = calculate_trailing_stop(
                 logic_type=trailing_logic,
                 current_price=close,
@@ -128,7 +132,10 @@ def simulate_trade(df, entry_idx, signal):
                 df=df.iloc[max(0, curr_idx + 1 - 100):curr_idx + 1],
                 atr=getattr(signal, 'atr', 0.0),
                 entry_price=signal.entry,
-                tp_filled=partial_taken
+                tp_filled=partial_taken,
+                highest_price=highest_price,
+                lowest_price=lowest_price,
+                ticker=signal.ticker,
             )
                 
         elif signal.direction == 'SELL':
@@ -162,6 +169,8 @@ def simulate_trade(df, entry_idx, signal):
                 partial_taken = True
                 
             # Always calculate trailing stops (not just after partial TP)
+            highest_price = max(highest_price, high)
+            lowest_price = min(lowest_price, low)
             current_sl = calculate_trailing_stop(
                 logic_type=trailing_logic,
                 current_price=close,
@@ -170,7 +179,10 @@ def simulate_trade(df, entry_idx, signal):
                 df=df.iloc[max(0, curr_idx + 1 - 100):curr_idx + 1],
                 atr=getattr(signal, 'atr', 0.0),
                 entry_price=signal.entry,
-                tp_filled=partial_taken
+                tp_filled=partial_taken,
+                highest_price=highest_price,
+                lowest_price=lowest_price,
+                ticker=signal.ticker,
             )
 
         # Update gap tracking for next iteration
@@ -496,6 +508,14 @@ def run_stateful_backtest(strategies_to_test: list, days_to_test: int, starting_
             wins += 1
         else:
             losses += 1
+        strat = pos.get("strategy_name", "unknown")
+        if strat not in strategy_stats:
+            strategy_stats[strat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+        strategy_stats[strat]["pnl"] += trade_pnl
+        if trade_pnl > 0:
+            strategy_stats[strat]["wins"] += 1
+        else:
+            strategy_stats[strat]["losses"] += 1
         # Update peak equity and max drawdown when trades close at end of backtest
         peak_equity = max(peak_equity, account_equity)
         max_drawdown = max(max_drawdown, (peak_equity - account_equity) / peak_equity)

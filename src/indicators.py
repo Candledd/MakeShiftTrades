@@ -229,8 +229,12 @@ def calc_vpin(
     deltas = np.empty(count, dtype=np.float64)
     vols = np.empty(count, dtype=np.float64)
     for i in range(count):
-        deltas[i] = close_p[start + i] - open_p[start + i]
-        vols[i] = volume[start + i]
+        idx = start + i
+        if idx > 0:
+            deltas[i] = close_p[idx] - close_p[idx - 1]
+        else:
+            deltas[i] = close_p[idx] - open_p[idx]
+        vols[i] = volume[idx]
 
     # Standard deviation of deltas over the window
     mean_delta = 0.0

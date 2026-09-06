@@ -138,28 +138,56 @@ class BaseStrategy(ABC):
         volume_np = clean["Volume"].values[-window:]
         return calc_vpin(open_np, close_np, volume_np, window)
 
-    def is_on_cooldown(self, ticker: str) -> bool:
+    def is_on_cooldown(
+        self, ticker: str, current_time: Optional[float | datetime | pd.Timestamp] = None
+    ) -> bool:
         """Check if the given ticker is currently in cooldown.
 
-        Returns True if a signal was recorded recently enough that the
-        cooldown period has not yet elapsed.
+        If *current_time* is provided (e.g. during backtesting), compares
+        against the simulated bar timestamp. Otherwise falls back to system
+        wall-clock time.
         """
         import config
 
         if ticker not in self._last_signal_time:
             return False
-        elapsed = time.time() - self._last_signal_time[ticker]
+
+        last_time = self._last_signal_time[ticker]
+        if current_time is not None:
+            curr_sec = (
+                current_time.timestamp()
+                if isinstance(current_time, (datetime, pd.Timestamp))
+                else float(current_time)
+            )
+            last_sec = (
+                last_time.timestamp()
+                if isinstance(last_time, (datetime, pd.Timestamp))
+                else float(last_time)
+            )
+            elapsed = curr_sec - last_sec
+        else:
+            now_sec = time.time()
+            last_sec = (
+                last_time.timestamp()
+                if isinstance(last_time, (datetime, pd.Timestamp))
+                else float(last_time)
+            )
+            elapsed = now_sec - last_sec
+
         return elapsed < config.SIGNAL_COOLDOWN_SECONDS
 
-    def record_signal(self, ticker: str) -> None:
-        """Record that a signal was generated for *ticker* at the current time."""
-        self._last_signal_time[ticker] = time.time()
+    def record_signal(
+        self, ticker: str, timestamp: Optional[float | datetime | pd.Timestamp] = None
+    ) -> None:
+        """Record that a signal was generated for *ticker* at the given time or now."""
+        self._last_signal_time[ticker] = timestamp if timestamp is not None else time.time()
 
     def get_htf_trend(
         self,
         ticker: str,
         htf_interval: str = "1d",
         htf_period: str = "3mo",
+        as_of: Optional[datetime | pd.Timestamp] = None,
     ) -> Optional[str]:
         """Fetch higher-timeframe data and determine the macro trend.
 
@@ -168,21 +196,37 @@ class BaseStrategy(ABC):
         ``"bearish"`` if EMA(20) < EMA(50) and close < EMA(20),
         or ``None`` otherwise (neutral / error).
 
-        Results are cached for up to 6 hours (21600 seconds) per ticker.
+        When *as_of* is provided (e.g. during backtesting), evaluates
+        trend strictly on or before *as_of* to prevent lookahead bias.
         """
-        # Check cache first
-        if ticker in self._htf_cache:
+        now = time.time()
+        # In live mode (no as_of), use 6-hour cache
+        if as_of is None and ticker in self._htf_cache:
             cache_time, cached_trend = self._htf_cache[ticker]
-            if time.time() - cache_time < 21600:
+            if now - cache_time < 21600:
                 return cached_trend
 
         try:
             from charts.data import fetch_ohlcv
 
-            df = fetch_ohlcv(ticker, interval=htf_interval, period=htf_period)
+            end_date_arg = str(as_of) if as_of is not None else None
+            df = fetch_ohlcv(ticker, interval=htf_interval, period=htf_period, end_date=end_date_arg)
             if df is None or len(df) < 50:
-                self._htf_cache[ticker] = (time.time(), None)
+                if as_of is None:
+                    self._htf_cache[ticker] = (now, None)
                 return None
+
+            if as_of is not None:
+                # Ensure timezone compatibility for filtering
+                if df.index.tz is not None and getattr(as_of, "tzinfo", None) is None:
+                    as_of_tz = pd.to_datetime(as_of).tz_localize("UTC")
+                elif df.index.tz is None and getattr(as_of, "tzinfo", None) is not None:
+                    as_of_tz = pd.to_datetime(as_of).tz_localize(None)
+                else:
+                    as_of_tz = as_of
+                df = df[df.index <= as_of_tz]
+                if len(df) < 50:
+                    return None
 
             close = df["Close"]
             ema20 = close.ewm(span=20, adjust=False).mean()
@@ -199,9 +243,11 @@ class BaseStrategy(ABC):
             else:
                 trend = None
 
-            self._htf_cache[ticker] = (time.time(), trend)
+            if as_of is None:
+                self._htf_cache[ticker] = (now, trend)
             return trend
         except Exception:
             logger.exception("get_htf_trend failed for %s", ticker)
-            self._htf_cache[ticker] = (time.time(), None)
+            if as_of is None:
+                self._htf_cache[ticker] = (now, None)
             return None

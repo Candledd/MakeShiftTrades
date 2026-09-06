@@ -112,8 +112,9 @@ class TrendFollowingStrategy(BaseStrategy):
             )
             return None
 
+        bar_ts = df.index[-1]
         # Cooldown check
-        if self.is_on_cooldown(ticker):
+        if self.is_on_cooldown(ticker, current_time=bar_ts):
             logger.debug("%s: %s on cooldown, skipping", self.name, ticker)
             return None
 
@@ -200,7 +201,11 @@ class TrendFollowingStrategy(BaseStrategy):
         reason = " | ".join(reason_parts)
         reason += " | Trail: Donchian(20)"
 
-        self.record_signal(ticker)
+        self.record_signal(ticker, timestamp=bar_ts)
+
+        sig_timestamp = bar_ts if isinstance(bar_ts, datetime) else datetime.now(timezone.utc)
+        if sig_timestamp.tzinfo is None:
+            sig_timestamp = sig_timestamp.replace(tzinfo=timezone.utc)
 
         return StrategySignal(
             ticker=ticker,
@@ -213,7 +218,7 @@ class TrendFollowingStrategy(BaseStrategy):
             timeframe=self.timeframe,
             reason=reason,
             atr=atr_val,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=sig_timestamp,
             order_type="MARKET",
             time_stop_bars=999999,
             trailing_stop_logic="donchian",

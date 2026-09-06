@@ -30,47 +30,40 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _estimate_ou_half_life(
-    prices: np.ndarray,
+    series: np.ndarray,
     lookback: int = 80,
 ) -> Optional[float]:
     """Estimate the OU mean-reversion half-life via Kalman-filtered AR(1).
 
-    Replaces the rolling ``numpy.polyfit`` regression with a 1D Kalman
-    Filter to avoid the "ghosting" effect of fixed-window estimators.
-
-    Formulates the AR(1) process :math:`S_t = \\alpha + \\beta S_{t-1} + \\varepsilon_t`
-    into state-space form where the hidden state is :math:`[\\alpha,\\, \\beta]^T`.
+    Estimates the AR(1) process :math:`S_t = \\alpha + \\beta S_{t-1} + \\varepsilon_t`
+    in state-space form using a 1D Kalman filter on the stationary price deviation
+    or Z-score series to avoid fixed-window ghosting.
 
     The discrete-time half-life is computed as:
 
-        H = -\\ln(2) / \\ln(\\beta)
-
-    where *β* is the AR(1) slope from the final Kalman state estimate.
+        H = -\\ln(2) / \\ln(|\\beta|)
 
     Parameters
     ----------
-    prices : np.ndarray
-        Log-price series (``np.log(close)``) with at least
-        *lookback* + 2 observations.  The AR(1) state-space model
-        :math:`S_t = \\alpha + \\beta S_{t-1}` operates directly on
-        the (log-)price without pre-detrending.
+    series : np.ndarray
+        Stationary mean-reverting series (e.g. Z-Score or price deviation from SMA/VWAP)
+        with at least *lookback* + 2 observations.
     lookback : int
-        How many price observations to regress over (default 80).
+        Number of observations to regress over (default 80).
 
     Returns
     -------
     float or None
-        Half-life in bars, or None if the estimate is not mathematically
-        valid (β ≥ 1 — explosive; β ≤ 0 — not mean-reverting; or half-life
-        outside the 5–50 bar sanity window).
+        Half-life in bars, or None if the estimate is not mean-reverting
+        (β ≥ 1 — explosive; β ≤ -0.2 — extreme noise; or half-life outside 2–60 bars).
     """
-    if len(prices) < lookback + 2:
+    if len(series) < lookback + 2:
         return None
 
-    # Trailing window (avoid copying the full array)
-    seg = prices[-(lookback + 1):]
+    # Trailing window
+    seg = series[-(lookback + 1):]
 
-    # Guard against degenerate series (all identical / near-zero values)
+    # Guard against degenerate series
     seg_var = np.var(seg)
     if seg_var < 1e-12:
         return None
@@ -80,18 +73,11 @@ def _estimate_ou_half_life(
     # Observation:         y_t = S_t
     # Measurement vector:  H_k = [1, S_{k-1}]
 
-    # Process noise covariance (random walk prior — near-constant state)
     Q = np.eye(2) * 1e-4
-
-    # Observation noise variance — a fraction of the data variance,
-    # corresponding to the AR(1) innovation variance.
     R = 0.5 * seg_var + 1e-8
 
-    # Initial state: start with zero coefficients
     x = np.zeros(2)
-    # Initial covariance — high uncertainty
     P = np.eye(2) * 10.0
-
     I = np.eye(2)
 
     # ── Recursive Kalman update ────────────────────────────────────────
@@ -99,10 +85,8 @@ def _estimate_ou_half_life(
         y = seg[i]                     # S_t
         H = np.array([1.0, seg[i - 1]])  # [1, S_{t-1}]
 
-        # Predict (state transition is identity — random walk)
         P_pred = P + Q
 
-        # Update
         innovation = y - H @ x
         innov_cov = H @ P_pred @ H + R
         K = P_pred @ H / innov_cov
@@ -114,19 +98,14 @@ def _estimate_ou_half_life(
     beta = x[1]
 
     # Edge cases — non-stationary or non-reverting dynamics
-    #   β >= 1  → explosive (unit root or worse)
-    #   β <= -0.2 → allow slight oscillatory mean reversion, but reject extreme noise
-    if beta >= 1.0:
-        return None
-    if beta <= -0.2:
+    if beta >= 1.0 or beta <= -0.2:
         return None
 
     # Exact discrete-time half-life for AR(1) envelope: |β|^H = 0.5
-    # Use abs(beta) so oscillatory mean reversion (beta < 0) calculates correctly
     half_life = -np.log(2.0) / np.log(abs(beta))
 
-    # Bounds check — half-life must be meaningful for intraday mean reversion
-    if half_life < 5.0 or half_life > 50.0:
+    # Bounds check — half-life must be meaningful for intraday mean reversion (2 to 60 bars)
+    if half_life < 2.0 or half_life > 60.0:
         return None
 
     return half_life
@@ -159,6 +138,15 @@ class MeanReversionStrategy(BaseStrategy):
             logger.debug("%s: too few bars (%d)", self.name, len(df))
             return None
 
+        # ── RTH Gate: Trade strictly during Regular Market Hours (09:45–15:45 ET) ──
+        if ticker.upper() in ("SPY", "QQQ"):
+            bar_ts = df.index[-1]
+            bar_ny = bar_ts.tz_convert("America/New_York").time() if bar_ts.tzinfo is not None else bar_ts.time()
+            from datetime import time as dt_time
+            if bar_ny < dt_time(9, 45) or bar_ny > dt_time(15, 45):
+                logger.debug("%s %s: outside regular trading hours (%s), skipping", self.name, ticker, bar_ny)
+                return None
+
         close = df["Close"]
 
         # ── VPIN toxicity gate ------------------------------------------
@@ -186,10 +174,14 @@ class MeanReversionStrategy(BaseStrategy):
         rs = avg_gain / avg_loss
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        # -- VWAP (daily-resetting intraday VWAP) -------------------------
-        cum_pv = (df["Close"] * df["Volume"]).groupby(df.index.normalize()).cumsum()
-        cum_vol = df["Volume"].groupby(df.index.normalize()).cumsum()
-        vwap = cum_pv / cum_vol
+        # -- VWAP (session-anchored intraday VWAP) -----------------------
+        if df.index.tz is not None:
+            session_dates = df.index.tz_convert("America/New_York").date
+        else:
+            session_dates = df.index.date
+        cum_pv = (df["Close"] * df["Volume"]).groupby(session_dates).cumsum()
+        cum_vol = df["Volume"].groupby(session_dates).cumsum()
+        vwap = cum_pv / cum_vol.replace(0, np.nan)
 
         # -- Current values (last bar) -----------------------------------
         current_close = float(close.iloc[-1])
@@ -221,7 +213,8 @@ class MeanReversionStrategy(BaseStrategy):
             return None
 
         # -- Institutional Filters: Kalman Regime & Volume Capitulation ---
-        detrended = np.log(close).dropna().to_numpy()
+        z_series = (close - sma20) / std20.replace(0, np.nan)
+        detrended = z_series.dropna().to_numpy()
         half_life = _estimate_ou_half_life(detrended)
         
         # 1. Statistical Regime Gate (OU Process)
@@ -232,13 +225,13 @@ class MeanReversionStrategy(BaseStrategy):
             return None
 
         # 2. Volume Capitulation Gate
-        # Institutional sweeps cause volume spikes at extremes. Low-volume drift is a trap.
+        # Institutional sweeps cause volume spikes at extremes. Look at max of last 2 bars.
         avg_volume = float(df["Volume"].rolling(config.MR_BB_PERIOD).mean().iloc[-1])
-        current_volume = float(df["Volume"].iloc[-1])
+        recent_volume = float(df["Volume"].iloc[-2:].max())
         vol_multiplier = config.MR_VOL_SPIKE_MULT if config.MR_VOL_SPIKE_MULT > 0 else 1.25
         
-        if current_volume < (avg_volume * vol_multiplier):
-            logger.debug("%s %s: Insufficient volume capitulation (Vol: %d < Avg: %d * %.2f)", self.name, ticker, current_volume, avg_volume, vol_multiplier)
+        if recent_volume < (avg_volume * vol_multiplier):
+            logger.debug("%s %s: Insufficient volume capitulation (Vol: %d < Avg: %d * %.2f)", self.name, ticker, recent_volume, avg_volume, vol_multiplier)
             return None
 
         # -- Entry / Exit -----------------------------------------------
@@ -247,17 +240,9 @@ class MeanReversionStrategy(BaseStrategy):
 
         # Target the SMA20 (Bollinger Band mean) — this is the statistical
         # center the Z-score measures deviation from, so it is the natural
-        # mean-reversion target.  Previously we used min/max(VWAP, SMA20)
-        # which picked the *closer* mean, producing tiny TP distances that
-        # — combined with the stop clamp below — created stops tight enough
-        # to get hit on noise, destroying expectancy.
+        # mean-reversion target.
         target_price = current_sma20
 
-        # Stop Loss: use the raw ATR-based distance.  The old code clamped
-        # stop_distance to tp_distance * 1.5, which created artificially
-        # tight stops (often < 0.2% of price) that were hit on random noise
-        # before the reversion could play out.  The MR_MIN_RR gate below
-        # still filters trades whose R:R is unacceptable.
         stop_distance = config.MR_STOP_MULT * atr_val
 
         stop_loss = entry - stop_distance if direction == "BUY" else entry + stop_distance
@@ -291,15 +276,19 @@ class MeanReversionStrategy(BaseStrategy):
         trail_logic = "vwap"
 
         # -- OU Half-Life Dynamic Time Stop -----------------------------
-        # half_life is pre-calculated in the institutional filter above
-        time_stop_bars = max(5, min(100, int(np.ceil(2.0 * half_life))))
+        time_stop_bars = max(4, min(30, int(np.ceil(2.0 * half_life))))
         logger.debug(
-            "%s %s: OU half-life=%.1f bars \u2192 time_stop=%d bars",
+            "%s %s: OU half-life=%.1f bars -> time_stop=%d bars",
             self.name, ticker, half_life, time_stop_bars,
         )
 
         # -- Record signal ----------------------------------------------
-        self.record_signal(ticker)
+        bar_ts = df.index[-1]
+        self.record_signal(ticker, timestamp=bar_ts)
+
+        sig_timestamp = bar_ts if isinstance(bar_ts, datetime) else datetime.now(timezone.utc)
+        if sig_timestamp.tzinfo is None:
+            sig_timestamp = sig_timestamp.replace(tzinfo=timezone.utc)
 
         return StrategySignal(
             ticker=ticker,
@@ -312,7 +301,7 @@ class MeanReversionStrategy(BaseStrategy):
             timeframe=self.timeframe,
             reason=reason,
             atr=round(atr_val, 4),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=sig_timestamp,
             order_type=order_type,
             time_stop_bars=time_stop_bars,
             trailing_stop_logic=trail_logic,

@@ -162,9 +162,13 @@ def calculate_trailing_stop(
     # ── sma20_or_ema (trend pullback) ─────────────────────────────────────
     elif logic_type == "sma20_or_ema":
         if not tp_filled:
-            # Do not trail until partial TP is taken — the entry condition is
-            # close < SMA20, so trailing to SMA20 immediately would jump the
-            # stop above entry, guaranteeing tiny wins and inflating winrate.
+            # Advance stop to breakeven once trade is substantially in profit (>= 0.75 ATR)
+            # to protect gains against sudden reversals before partial TP fills
+            if entry_price is not None and atr > 0:
+                if is_long and (current_price - entry_price) >= 0.75 * atr:
+                    return max(current_sl, entry_price)
+                elif not is_long and (entry_price - current_price) >= 0.75 * atr:
+                    return min(current_sl, entry_price)
             return current_sl
 
         if df is not None and len(df) >= 20:
