@@ -138,13 +138,14 @@ class MeanReversionStrategy(BaseStrategy):
             logger.debug("%s: too few bars (%d)", self.name, len(df))
             return None
 
-        # ── RTH Gate: Trade strictly during Regular Market Hours (09:45–15:45 ET) ──
+        # ── RTH Gate: Trade strictly during Regular Market Hours (09:45–15:00 ET) ──
+        # Cutting off entries at 15:00 ET ensures positions do not hold into overnight gap risk
         if ticker.upper() in ("SPY", "QQQ"):
             bar_ts = df.index[-1]
             bar_ny = bar_ts.tz_convert("America/New_York").time() if bar_ts.tzinfo is not None else bar_ts.time()
             from datetime import time as dt_time
-            if bar_ny < dt_time(9, 45) or bar_ny > dt_time(15, 45):
-                logger.debug("%s %s: outside regular trading hours (%s), skipping", self.name, ticker, bar_ny)
+            if bar_ny < dt_time(9, 45) or bar_ny > dt_time(15, 0):
+                logger.debug("%s %s: outside regular trading entry window (%s), skipping", self.name, ticker, bar_ny)
                 return None
 
         close = df["Close"]
@@ -211,6 +212,39 @@ class MeanReversionStrategy(BaseStrategy):
 
         if direction is None:
             return None
+
+        # Bandwidth expansion filter: avoid fading volatility explosions / runaway trends
+        bb_width = (2.0 * config.MR_BB_STD * std20) / sma20.replace(0, np.nan)
+        if len(bb_width) >= 6 and pd.notna(bb_width.iloc[-6]) and bb_width.iloc[-6] > 0:
+            if float(bb_width.iloc[-1]) > 1.50 * float(bb_width.iloc[-6]):
+                logger.debug("%s %s: BB bandwidth expanding rapidly (>1.5x), skipping MR", self.name, ticker)
+                return None
+
+        # ── Macro Trend Alignment: Fade in direction of daily trend ──
+        htf_trend = self.get_htf_trend(ticker, as_of=df.index[-1])
+        if htf_trend == "bullish" and direction == "SELL":
+            logger.debug("%s %s: cannot short into bullish HTF trend, skipping", self.name, ticker)
+            return None
+        if htf_trend == "bearish" and direction == "BUY":
+            logger.debug("%s %s: cannot buy into bearish HTF trend, skipping", self.name, ticker)
+            return None
+
+        # ── Candlestick Rejection Confirmation ──
+        # Avoid knife-catching extreme down-bars or standing in front of runaway up-bars
+        high_last = float(df["High"].iloc[-1])
+        low_last = float(df["Low"].iloc[-1])
+        candle_range = high_last - low_last
+        if candle_range > 0:
+            if direction == "BUY":
+                close_pos = (current_close - low_last) / candle_range
+                if close_pos < 0.30:
+                    logger.debug("%s %s: BUY candle closed at extreme low (%.2f < 0.30), skipping knife-catch", self.name, ticker, close_pos)
+                    return None
+            elif direction == "SELL":
+                high_pos = (high_last - current_close) / candle_range
+                if high_pos < 0.10:
+                    logger.debug("%s %s: SELL candle closed at extreme high (%.2f < 0.10), skipping runaway momentum", self.name, ticker, high_pos)
+                    return None
 
         # -- Institutional Filters: Kalman Regime & Volume Capitulation ---
         z_series = (close - sma20) / std20.replace(0, np.nan)

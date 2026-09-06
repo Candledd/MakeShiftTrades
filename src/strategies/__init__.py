@@ -186,7 +186,7 @@ class BaseStrategy(ABC):
         self,
         ticker: str,
         htf_interval: str = "1d",
-        htf_period: str = "3mo",
+        htf_period: str = "2y",
         as_of: Optional[datetime | pd.Timestamp] = None,
     ) -> Optional[str]:
         """Fetch higher-timeframe data and determine the macro trend.

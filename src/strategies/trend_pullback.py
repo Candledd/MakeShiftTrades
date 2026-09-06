@@ -70,12 +70,12 @@ class TrendPullbackStrategy(BaseStrategy):
             logger.debug("%s: too few bars (%d)", self.name, len(df))
             return None
 
-        # ── RTH Gate: Trade strictly during Regular Market Hours (09:45–15:45 ET) ──
+        # ── RTH Gate: Trade strictly during Regular Market Hours (09:45–15:00 ET) ──
         if ticker.upper() in ("SPY", "QQQ"):
             bar_ts = df.index[-1]
             bar_ny = bar_ts.tz_convert("America/New_York").time() if bar_ts.tzinfo is not None else bar_ts.time()
             from datetime import time as dt_time
-            if bar_ny < dt_time(9, 45) or bar_ny > dt_time(15, 45):
+            if bar_ny < dt_time(9, 45) or bar_ny > dt_time(15, 0):
                 logger.debug("%s %s: outside regular trading hours (%s), skipping", self.name, ticker, bar_ny)
                 return None
 
@@ -157,25 +157,41 @@ class TrendPullbackStrategy(BaseStrategy):
         poc_distance = abs(current_close - poc_price) / poc_price if poc_price > 0 else 0.0
         near_poc = poc_distance <= _VP_POC_DIST_PCT
 
-        # -- Simple pullback entry ---------------------------------------
-        # BUY if price dipped below SMA20 but is now showing a bullish candle
-        # (current_close > current_open) to indicate reversal.
+        # -- Pullback entry conditions -----------------------------------
+        # BUY if price dipped below SMA20, holds above EMA50, and forms a bullish rejection candle
         current_open = float(df["Open"].iloc[-1])
-        if not (low_last < current_sma20 and current_rsi < 50 and current_close > current_open):
+        if not (low_last < current_sma20 and current_rsi < 52 and current_close > current_open):
             return None
+
+        candle_range = float(high.iloc[-1] - low.iloc[-1])
+        if candle_range > 0:
+            close_position = (current_close - float(low.iloc[-1])) / candle_range
+            if close_position < 0.50:
+                logger.debug("%s %s: weak candle close (%.2f < 0.50), skipping", self.name, ticker, close_position)
+                return None
 
         direction: str = "BUY"
 
         # -- Entry / Exit -----------------------------------------------
         entry = current_close
         order_type = "MARKET"
-        stop_loss = self.compute_stop_loss(entry, direction, atr=atr_val)
 
-        # Take-profit: Realistic structural target based on SMA20 and stop distance
+        # Swing-low invalidation stop: lowest low of recent 5 bars minus 0.25 * ATR
+        recent_swing_low = float(low.iloc[-5:].min())
+        structural_sl = recent_swing_low - 0.25 * atr_val
+        min_sl = entry - 1.6 * atr_val
+        max_sl = entry - 0.85 * atr_val
+        stop_loss = max(min_sl, min(max_sl, structural_sl))
+
         sl_distance = abs(entry - stop_loss)
+        # Ensure entry is close to support: reject if price has already bounced too far from the swing low
+        if sl_distance > 1.35 * atr_val:
+            logger.debug("%s %s: entry too extended from swing low (SL dist %.2f > 1.35 ATR %.2f), skipping", self.name, ticker, sl_distance, 1.35 * atr_val)
+            return None
+
+        # Take-profit: Realistic target based on stop distance (1.15R - 1.25R)
         min_tp_dist = sl_distance * config.TP_MIN_RR
-        tp_target = max(entry + min_tp_dist, current_sma20)
-        take_profit = min(tp_target, entry + 2.5 * atr_val)
+        take_profit = entry + max(min_tp_dist, 1.15 * atr_val)
 
         if take_profit <= entry:
             logger.debug("%s %s: inverted TP/Entry (TP=%.2f <= Entry=%.2f)", self.name, ticker, take_profit, entry)

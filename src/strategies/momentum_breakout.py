@@ -225,6 +225,20 @@ class MomentumBreakoutStrategy(BaseStrategy):
             return None
         direction: str = "BUY" if is_buy else "SELL"
 
+        # Candle close quality filter: ensure strong directional close (reject upper/lower wick rejection traps)
+        candle_range = float(high.iloc[-1] - low.iloc[-1])
+        if candle_range > 0:
+            if is_buy:
+                close_pct = (current_close - float(low.iloc[-1])) / candle_range
+                if close_pct < 0.60:
+                    logger.debug("%s %s: BUY breakout candle closed weak (%.2f < 0.60), skipping", self.name, ticker, close_pct)
+                    return None
+            else:
+                close_pct = (float(high.iloc[-1]) - current_close) / candle_range
+                if close_pct < 0.60:
+                    logger.debug("%s %s: SELL breakout candle closed weak (%.2f < 0.60), skipping", self.name, ticker, close_pct)
+                    return None
+
         # ────────────────────────────────────────────────────────────────
         # Stage 2: Prior compression & volume expansion confirmation
         # ────────────────────────────────────────────────────────────────
